@@ -3,7 +3,7 @@
 
 #define MyAppName "Ditox Clipboard Manager"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.3.0"
+  #define MyAppVersion "0.3.1"
 #endif
 #define MyAppPublisher "grok-insider"
 #define MyAppURL "https://github.com/grok-insider/ditox"

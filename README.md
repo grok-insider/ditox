@@ -21,14 +21,14 @@ Trust the binary cache once (otherwise Nix will rebuild from source):
 ```nix
 # NixOS / nix.conf
 nix.settings = {
-  substituters = [ "https://cache.fabrials.com/fabrials" ];
+  substituters = [ "https://ditox.cachix.org" ];
   trusted-public-keys = [
-    "fabrials:vpcHFnI0zvmDmw7Hetdbew29BbS9JObpVNkzClA8Q3k="
+    "ditox.cachix.org-1:QfG+UY/7dvbRfIGwYgP05dea2Swgb8HpqcbxHJcJE3Y="
   ];
 };
 ```
 
-Or, with the Cachix CLI: `cachix use grok-insider`.
+Or, with the Cachix CLI: `cachix use ditox`.
 
 Then run or install:
 

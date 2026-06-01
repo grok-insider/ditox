@@ -14,11 +14,11 @@
   # prompt, or add them to nix.settings on NixOS).
   nixConfig = {
     extra-substituters = [
-      "https://cache.fabrials.com/fabrials"
+      "https://ditox.cachix.org"
       "https://nix-community.cachix.org"
     ];
     extra-trusted-public-keys = [
-      "fabrials:vpcHFnI0zvmDmw7Hetdbew29BbS9JObpVNkzClA8Q3k="
+      "ditox.cachix.org-1:QfG+UY/7dvbRfIGwYgP05dea2Swgb8HpqcbxHJcJE3Y="
       "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
     ];
   };

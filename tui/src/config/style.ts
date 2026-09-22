@@ -1,5 +1,5 @@
 import { createTextAttributes } from "@opentui/core";
-import type { TuiTheme } from "../theme";
+import { appearanceTheme, themes, type TuiTheme } from "../theme";
 import {
   tuiSurfaceNames,
   type ResolvedTuiConfig,
@@ -11,6 +11,15 @@ import {
 
 export function surface(config: ResolvedTuiConfig, name: TuiSurfaceName): TuiSurfaceStyle {
   return config.styles[name];
+}
+
+/** Follow the terminal light/dark mode only when the user did not pick a theme. */
+export function withAppearance(config: ResolvedTuiConfig, mode: "dark" | "light" | null): ResolvedTuiConfig {
+  if (config.themeLocked || mode === null) return config;
+  const name = appearanceTheme(mode);
+  if (config.theme.name === name) return config;
+  const theme = themes[name];
+  return { ...config, theme, styles: mergeStyles(theme, undefined) };
 }
 
 export function textStyle(style: TuiSurfaceStyle, fg: string = style.fg): TuiTextStyle {

@@ -11,7 +11,7 @@ import { HeaderBar } from "./components/HeaderBar";
 import { PreviewPane } from "./components/PreviewPane";
 import { Shell } from "./components/Shell";
 import { StatusLine } from "./components/StatusLine";
-import { ModeOverlay } from "./components/Overlay";
+import { helpCardSize, ModeOverlay } from "./components/Overlay";
 import { FullPreview } from "./components/FullPreview";
 import { AppFrame } from "./App";
 import { initialState } from "./state";
@@ -429,6 +429,66 @@ describe("OpenTUI render snapshots", () => {
     expect(frame.split("\n")[0]?.length).toBe(24);
   });
 
+  test("leads a history row with the copied text and image size", async () => {
+    const config = resolveTuiConfig();
+    const copied = textEntry(1, "https://example.com/clip", false);
+    copied.source_app = "firefox";
+    copied.created_at_ms = Date.now() - 15 * 60 * 1000;
+    const image = imageEntry(2);
+    image.preview = "Image image/png 2048 bytes";
+    const pinned = textEntry(3, "saved snippet", true);
+
+    const frame = await captureFrame(
+      () => (
+        <EntryList
+          config={config}
+          entries={[pinned, copied, image]}
+          selectedIndex={0}
+          selectedIds={new Set()}
+          rows={10}
+          width={80}
+          widthPercent={100}
+          query=""
+          onSelectEntry={() => {}}
+          onScroll={() => {}}
+        />
+      ),
+      80,
+      10,
+    );
+
+    const copiedLine = frame.split("\n").find((row) => row.includes("https://example.com/clip")) ?? "";
+    expect(copiedLine.indexOf("https://example.com/clip")).toBeLessThan(copiedLine.indexOf("firefox"));
+    expect(frame).toContain("32x24");
+    expect(frame).not.toContain("Image image");
+    expect(frame.indexOf("PINNED")).toBeLessThan(frame.indexOf("saved snippet"));
+    expect(frame.indexOf("saved snippet")).toBeLessThan(frame.indexOf("https://example.com/clip"));
+  });
+
+  test("drops whole status hint groups instead of cutting a chord", async () => {
+    const config = resolveTuiConfig();
+    const watcher = {
+      running: true,
+      paused: false,
+      backend: "wayland",
+      poll_interval_ms: 250,
+      last_seen_ms: Date.now(),
+      last_error: null,
+    };
+
+    const frame = await captureFrame(
+      () => <StatusLine config={config} status="100 entries" watcher={watcher} width={88} />,
+      88,
+      1,
+    );
+
+    expect(frame).toContain("space / right preview");
+    expect(frame).toContain("watcher live");
+    expect(frame).toContain("100 entries");
+    expect(frame).not.toContain("...");
+    expect(frame).not.toContain("preview /");
+  });
+
   test("bounds status line segments in narrow terminals", async () => {
     const config = resolveTuiConfig({
       labels: {
@@ -538,6 +598,48 @@ describe("OpenTUI render snapshots", () => {
     expect(frame).toContain("clear including pinned");
     expect(frame).toContain("c x");
     expectFrameWithin(frame, 126, config.layout.helpOverlayHeight);
+  });
+
+  test("keeps every default keymap action intact inside the floating picker", async () => {
+    const config = resolveTuiConfig();
+    const card = helpCardSize(config, 120, 40);
+    const frame = await captureFrame(
+      () => <ModeOverlay config={config} state={{ ...initialState(), mode: "help" as const }} width={card.width} height={card.height} />,
+      card.width,
+      card.height,
+    );
+
+    expect(frame).toContain("move selection");
+    expect(frame).toContain("page up / down");
+    expect(frame).toContain("jump first / last");
+    expect(frame).toContain("show pinned only");
+    expect(frame).toContain("mark / isolate / clear");
+    expect(frame).toContain("extend selection");
+    expect(frame).toContain("search / next filter");
+    expect(frame).toContain("copy search matches");
+    expect(frame).toContain("clear all / text / images");
+    expect(frame).toContain("clear including pinned");
+    expect(frame).not.toContain("...");
+    expectFrameWithin(frame, card.width, card.height);
+  });
+
+  test("stacks the keymap in one column when two full columns do not fit", async () => {
+    const config = resolveTuiConfig();
+    const card = helpCardSize(config, 80, 40);
+
+    expect(card.height).toBeGreaterThan(config.layout.helpOverlayHeight);
+    expect(card.width).toBeLessThanOrEqual(80);
+
+    const frame = await captureFrame(
+      () => <ModeOverlay config={config} state={{ ...initialState(), mode: "help" as const }} width={card.width} height={card.height} />,
+      card.width,
+      card.height,
+    );
+
+    expect(frame).toContain("shift+up");
+    expect(frame).toContain("clear all / text / images");
+    expect(frame).not.toContain("...");
+    expectFrameWithin(frame, card.width, card.height);
   });
 
   test("does not paint extra help rows past a short configured frame", async () => {
@@ -1576,6 +1678,22 @@ describe("OpenTUI render snapshots", () => {
     expect(colorHex(findSpan(helpSpans, "route-action"))).toBe("#999999");
   });
 
+  test("highlights markdown in the preview instead of painting the raw markers", async () => {
+    const config = resolveTuiConfig({ layout: { showMetadata: false, showPreviewGutter: false } });
+    const frame = await captureFrameUntil(
+      () => (
+        <Shell config={config}>
+          <PreviewPane config={config} entry={textEntry(4, "# Title\n\nplain paragraph", false)} rows={10} width={40} />
+        </Shell>
+      ),
+      44,
+      12,
+      (next) => next.includes("Title"),
+    );
+    expect(frame).toContain("Title");
+    expect(frame).not.toContain("# Title");
+  });
+
   test("renders customized full preview labels and scrolled content", async () => {
     const config = resolveTuiConfig({
       labels: {
@@ -2410,7 +2528,7 @@ describe("OpenTUI render snapshots", () => {
     );
 
     expect(frame).toContain("clip:14|browser|image/png|32x24|abcdef|P");
-    expect(frame).toContain("image/png 32x24");
+    expect(frame).toContain("32x24");
   });
 
   test("bounds long custom row metadata before rendering the preview text", async () => {

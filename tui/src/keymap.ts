@@ -54,6 +54,16 @@ export function useDitoxKeymap(actions: DitoxKeymapActions) {
         ctx.consume();
         return;
       }
+      if (mode === "browse") {
+        const typed = browseTypeQuery((ctx.event as { sequence?: string }).sequence, actions.config.keyBindings);
+        if (!typed) return;
+        actions.setState((previous) => {
+          const opened = openSearch(previous, actions.config.behavior.clearQueryOnSearchOpen);
+          return updateSearchQuery(opened, opened.query + typed);
+        });
+        ctx.consume();
+        return;
+      }
       if (mode !== "search") return;
       const event = ctx.event as any;
       const specialKeys = [
@@ -164,6 +174,18 @@ export function useDitoxKeymap(actions: DitoxKeymapActions) {
       ],
     };
   });
+}
+
+export function browseTypeQuery(sequence: string | undefined, bindings: ResolvedTuiConfig["keyBindings"]): string | null {
+  if (typeof sequence !== "string" || sequence.length !== 1 || sequence < " " || sequence === "\u007f") return null;
+  const key = normalizeKey(sequence);
+  for (const value of Object.values(bindings)) {
+    for (const binding of value) {
+      const strokes = binding.trim().split(/\s+/).filter(Boolean);
+      if (strokes.length > 0 && normalizeKey(strokes[0] ?? "") === key) return null;
+    }
+  }
+  return sequence;
 }
 
 function bind(keys: string[], cmd: () => void | Promise<void>): Array<{ key: string; cmd: () => void | Promise<void> }> {

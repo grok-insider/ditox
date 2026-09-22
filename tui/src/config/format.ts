@@ -54,10 +54,78 @@ export function helpRows(config: ResolvedTuiConfig): Array<{ keys: string; actio
 }
 
 export function statusHint(config: ResolvedTuiConfig, mode: TuiStatusHintMode = "browse"): string {
+  const labels = config.labels;
+  return formatTemplate(statusHintTemplate(labels, mode), statusHintReplacements(config));
+}
+
+// Keeps whole hint groups. A narrow status line used to end on a cut chord
+// such as "preview /..." because the hint was one string clipped with an ellipsis.
+export type StatusHintSpan = { role: "keys" | "action" | "gap"; text: string };
+
+export function fittedStatusHint(config: ResolvedTuiConfig, width: number, mode: TuiStatusHintMode = "browse"): string {
+  return fittedStatusHintSpans(config, width, mode).map((span) => span.text).join("");
+}
+
+export function fittedStatusHintSpans(config: ResolvedTuiConfig, width: number, mode: TuiStatusHintMode = "browse"): StatusHintSpan[] {
+  const labels = config.labels;
+  const replacements = statusHintReplacements(config);
+  const collapse = (value: string) => collapseStatusWhitespace(value, labels.textWhitespaceReplacement);
+  const separator = collapse(replacements.separator);
+  const groups = statusHintTemplate(labels, mode)
+    .split("{separator}")
+    .map((group) => hintGroupSpans(group, replacements, collapse))
+    .filter((group) => group.some((span) => span.text.length > 0));
+  if (width <= 0 || groups.length === 0) return [];
+  const textOf = (group: StatusHintSpan[]) => group.map((span) => span.text).join("");
+  const full = groups.map(textOf).join(separator);
+  const chosen = full.length <= width ? groups : groups.slice(0, fittingGroupCount(groups.map(textOf), separator, width));
+  if (chosen.length === 0) {
+    const clipped = truncateStatusHint(textOf(groups[0] ?? []), width, labels.textTruncationMarker);
+    return clipped.length > 0 ? [{ role: "action", text: clipped }] : [];
+  }
+  const spans: StatusHintSpan[] = [];
+  chosen.forEach((group, index) => {
+    if (index > 0 && separator.length > 0) spans.push({ role: "gap", text: separator });
+    spans.push(...group);
+  });
+  return spans;
+}
+
+function fittingGroupCount(groups: string[], separator: string, width: number): number {
+  let count = 0;
+  for (const group of groups) {
+    const next = count === 0 ? group : `${groups.slice(0, count).join(separator)}${separator}${group}`;
+    if (next.length > width) break;
+    count += 1;
+  }
+  return count;
+}
+
+function hintGroupSpans(template: string, replacements: Record<string, string>, collapse: (value: string) => string): StatusHintSpan[] {
+  const spans: StatusHintSpan[] = [];
+  const pattern = /\{([a-zA-Z0-9_]+)\}/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(template)) !== null) {
+    if (match.index > cursor) pushHintSpan(spans, "action", collapse(template.slice(cursor, match.index)));
+    const name = match[1] ?? "";
+    pushHintSpan(spans, name.endsWith("Keys") ? "keys" : "action", collapse(replacements[name] ?? ""));
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < template.length) pushHintSpan(spans, "action", collapse(template.slice(cursor)));
+  return spans;
+}
+
+function pushHintSpan(spans: StatusHintSpan[], role: "keys" | "action", text: string) {
+  if (text.length === 0) return;
+  spans.push({ role, text });
+}
+
+function statusHintReplacements(config: ResolvedTuiConfig): Record<string, string> {
   const keys = config.keyBindings;
   const labels = config.labels;
   const keyLabels = config.keyLabels;
-  return formatTemplate(statusHintTemplate(labels, mode), {
+  return {
     pasteKeys: keyDisplay(keys.copyPaste, labels, keyLabels),
     paste: labels.statusPasteHint,
     copyKeys: keyDisplay(keys.copyOnly, labels, keyLabels),
@@ -95,7 +163,20 @@ export function statusHint(config: ResolvedTuiConfig, mode: TuiStatusHintMode = 
     confirmNoKeys: keyDisplay(keys.confirmNo, labels, keyLabels),
     confirmNo: labels.statusConfirmNoHint,
     separator: labels.statusHintSeparator,
-  });
+  };
+}
+
+function collapseStatusWhitespace(value: string, replacement: string): string {
+  const space = replacement.length > 0 ? replacement : " ";
+  return value.replace(/\s+/g, space);
+}
+
+function truncateStatusHint(value: string, width: number, marker: string): string {
+  if (width <= 0) return "";
+  if (value.length <= width) return value;
+  const ellipsis = marker.length > 0 ? marker : "...";
+  if (width <= ellipsis.length) return ellipsis.slice(0, width);
+  return `${value.slice(0, width - ellipsis.length)}${ellipsis}`;
 }
 
 function statusHintTemplate(labels: TuiLabels, mode: TuiStatusHintMode): string {

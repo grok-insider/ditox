@@ -11,6 +11,7 @@ import {
   writeTerminalExitReset,
 } from "./App";
 import { createTestKeymap } from "@opentui/keymap/testing";
+import { browseTypeQuery } from "./keymap";
 import { resolveTuiConfig } from "./tui-config";
 import type { Entry } from "./types";
 
@@ -32,6 +33,15 @@ const imageEntry: Entry = {
 };
 
 describe("App helpers", () => {
+  test("typing an unbound character opens search and leaves movement keys alone", () => {
+    const bindings = resolveTuiConfig().keyBindings;
+    expect(browseTypeQuery("h", bindings)).toBe("h");
+    expect(browseTypeQuery("j", bindings)).toBeNull();
+    expect(browseTypeQuery("c", bindings)).toBeNull();
+    expect(browseTypeQuery("/", bindings)).toBeNull();
+    expect(browseTypeQuery(" ", bindings)).toBeNull();
+  });
+
   test("expands Enter bindings for OpenTUI return key events", () => {
     expect(runtimeKeysForBinding(["enter"])).toEqual(["enter", "return"]);
     expect(runtimeKeysForBinding(["return"])).toEqual(["enter", "return"]);
@@ -160,9 +170,11 @@ describe("App helpers", () => {
       bracketed_paste: true,
       hyperlinks: true,
       osc52: true,
+      osc52_support: "supported",
       notifications: false,
       explicit_cursor_positioning: true,
-      in_tmux: false,
+      remote: false,
+      multiplexer: "none",
       terminal: { name: "kitty", version: "0.40.0", from_xtversion: true },
     } as const;
 

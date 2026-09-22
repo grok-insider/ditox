@@ -2,6 +2,10 @@ export const themeNames = ["grokbuild", "ditoxDark", "ditoxLight", "groknight", 
 
 export type ThemeName = (typeof themeNames)[number];
 
+export function appearanceTheme(mode: "dark" | "light"): ThemeName {
+  return mode === "light" ? "ditoxLight" : "grokbuild";
+}
+
 export type TuiTheme = {
   name: ThemeName;
   bgBase: string;

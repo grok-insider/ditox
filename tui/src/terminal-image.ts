@@ -106,10 +106,28 @@ export class TerminalImageManager implements TerminalImageManagerLike {
   private lastEmitKey = "";
   private lastKittyPayloadKey: string | null = null;
   private lastKittyImageId: number | null = null;
+  private overlayHold = false;
+  private heldRequest: NativeImageRequest | null = null;
 
   constructor(private readonly writer: TerminalWriter = (chunk) => process.stdout.write(chunk)) {}
 
+  // Kitty and Sixel graphics are composited above the cell grid, so a modal
+  // veil cannot cover them. Hold deletes the placement and ignores new queues
+  // until the veil closes, then restores the latest request.
+  setOverlayHold(hold: boolean): void {
+    if (hold === this.overlayHold) return;
+    this.overlayHold = hold;
+    if (hold) {
+      this.hidePlacement();
+      return;
+    }
+    const request = this.heldRequest;
+    if (request) this.queue(request);
+  }
+
   queue(request: NativeImageRequest): void {
+    this.heldRequest = request;
+    if (this.overlayHold) return;
     // Dedupe on the placement-relevant fields only. renderAfter queues a
     // request on every OpenTUI frame, so keying on the frame id would re-emit
     // the full graphics sequence per frame and make the image flicker; an
@@ -128,6 +146,11 @@ export class TerminalImageManager implements TerminalImageManagerLike {
   }
 
   clear(): void {
+    this.heldRequest = null;
+    this.hidePlacement();
+  }
+
+  private hidePlacement(): void {
     this.pending = null;
     this.lastEmitKey = "";
     if (this.timer) {
@@ -148,7 +171,7 @@ export class TerminalImageManager implements TerminalImageManagerLike {
   private flush(): void {
     const request = this.pending;
     this.pending = null;
-    if (!request) return;
+    if (!request || this.overlayHold) return;
 
     if (request.protocol === "kitty") {
       this.writer(this.kittySequence(request));

@@ -224,6 +224,50 @@ describe("terminal image previews", () => {
     expect(writes.filter((chunk) => chunk.includes("a=p"))).toHaveLength(2);
   });
 
+  test("hides a kitty placement while a modal covers it and restores it afterwards", async () => {
+    const writes: string[] = [];
+    const manager = new TerminalImageManager((chunk) => writes.push(chunk));
+    const image: DecodedImage = { width: 1, height: 1, pixels: Uint8Array.from([255, 0, 0, 255]) };
+    const request = {
+      protocol: "kitty" as const,
+      sourceKey: "red",
+      image,
+      background: "#000000",
+      screenX: 4,
+      screenY: 2,
+      cols: 1,
+      rows: 1,
+      pixelWidth: 1,
+      pixelHeight: 1,
+      contentPixelWidth: 1,
+      contentPixelHeight: 1,
+      contentOffsetX: 0,
+      contentOffsetY: 0,
+    };
+
+    manager.queue(request);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(writes.filter((chunk) => chunk.includes("a=p"))).toHaveLength(1);
+
+    manager.setOverlayHold(true);
+    expect(writes.at(-1)).toContain("a=d");
+
+    manager.queue({ ...request, screenX: 8 });
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(writes.filter((chunk) => chunk.includes("a=p"))).toHaveLength(1);
+
+    manager.setOverlayHold(false);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(writes.filter((chunk) => chunk.includes("a=p"))).toHaveLength(2);
+    expect(writes.at(-1)).toContain("\x1b[3;9H");
+
+    manager.setOverlayHold(true);
+    manager.clear();
+    manager.setOverlayHold(false);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    expect(writes.filter((chunk) => chunk.includes("a=p"))).toHaveLength(2);
+  });
+
   test("frees old Kitty image data only after the new placement is established", async () => {
     const writes: string[] = [];
     const manager = new TerminalImageManager((chunk) => writes.push(chunk));

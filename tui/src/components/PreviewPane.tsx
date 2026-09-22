@@ -7,7 +7,9 @@ import { selectNativeImageProtocol, type TerminalImageManagerLike, type Terminal
 import { formatTemplate, paddedTitle, surface, textStyle, type ResolvedTuiConfig } from "../tui-config";
 import type { Entry } from "../types";
 import { createImageBlockPreview } from "../use-image-block-preview";
+import { classifyPreview } from "../preview-syntax";
 import { ImagePreviewRows } from "./ImagePreviewRows";
+import { RichPreview } from "./RichPreview";
 import { imagePreviewBackground, imagePreviewNotice, previewBorderColor, previewContentColor, previewLineToneColor } from "./preview-shared";
 import { fitGutter, justifyContent, verticalJustify } from "./style-utils";
 
@@ -108,7 +110,7 @@ export function PreviewPane(props: {
       <Show when={layout().showMetadata ? props.entry : undefined}>
         {(entry) => <PreviewMeta config={props.config} entry={entry()} width={metaTextWidth()} />}
       </Show>
-      <box width="100%" flexGrow={1} flexDirection="column" justifyContent={verticalJustify(layout().previewBodyVerticalAlign)}>
+      <box width="100%" flexGrow={1} overflow="hidden" flexDirection="column" justifyContent={verticalJustify(layout().previewBodyVerticalAlign)}>
         <Show when={props.entry?.kind === "image" && blockPreview().kind === "rendered"}>
           <ImagePreviewRows
             preview={blockPreview()}
@@ -148,7 +150,10 @@ export function PreviewPane(props: {
             </text>
           </box>
         </Show>
-        <For each={lines()}>
+        <Show
+          when={props.entry?.kind === "text" && classifyPreview(props.entry.content) !== "plain" ? props.entry : undefined}
+          fallback={
+            <For each={lines()}>
           {(line, index) => (
             <>
               <box height={1} flexDirection="row" backgroundColor={style().bg}>
@@ -171,7 +176,13 @@ export function PreviewPane(props: {
               </Show>
             </>
           )}
-        </For>
+            </For>
+          }
+        >
+          {(entry) => (
+            <RichPreview content={entry().content} height={visibleTextRows()} fg={style().fg} bg={style().bg} scrollTop={0} theme={props.config.theme} />
+          )}
+        </Show>
       </box>
     </box>
   );

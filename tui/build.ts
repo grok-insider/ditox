@@ -6,6 +6,19 @@ const result = await Bun.build({
   target: "bun",
   outdir: "./dist",
   plugins: [solidPlugin],
+  // OpenTUI 0.5 loads the native library with a static import per OS/arch.
+  // Only the host package is installed. Leave every platform package external
+  // so the bundle resolves it from node_modules at runtime.
+  external: [
+    "@opentui/core-darwin-x64",
+    "@opentui/core-darwin-arm64",
+    "@opentui/core-linux-x64",
+    "@opentui/core-linux-x64-musl",
+    "@opentui/core-linux-arm64",
+    "@opentui/core-linux-arm64-musl",
+    "@opentui/core-win32-x64",
+    "@opentui/core-win32-arm64",
+  ],
 });
 
 if (!result.success) {

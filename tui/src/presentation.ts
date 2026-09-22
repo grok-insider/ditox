@@ -314,9 +314,112 @@ export function fitRowMeta(value: string, width: number, labels: Partial<TextFor
   return `${clipped}${" ".repeat(extra)}`;
 }
 
-export function entryPreview(entry: Entry, width: number, labels: Partial<Pick<TuiLabels, "emptyEntryPreview"> & TextFormatLabelSet> = {}): string {
+export function plainClipboardPreview(raw: string): string {
+  const withoutFences = raw.replace(/```[\w+-]*[ \t]*\n?|```/g, " ");
+  const lines = withoutFences.split(/\r?\n/).flatMap((line) => {
+    let text = line.trim();
+    text = text.replace(/^#{1,6}\s+/, "");
+    text = text.replace(/^>\s?/, "");
+    text = text.replace(/^(?:[-*+]|\d+\.)\s+/, "");
+    text = text.replace(/\s+/g, " ").trim();
+    return text.length > 0 ? [text] : [];
+  });
+  return lines.join(" ");
+}
+
+export function entryBody(entry: Entry, labels: Partial<Pick<TuiLabels, "emptyEntryPreview"> & TextFormatLabelSet> = {}): string {
+  if (entry.kind === "image") {
+    if (entry.image_width !== null && entry.image_height !== null) return `${entry.image_width}x${entry.image_height}`;
+    const mime = entry.mime.split(";")[0]?.replace(/^image\//, "").trim();
+    return mime && mime.length > 0 ? mime : "image";
+  }
   const raw = entry.preview ?? entry.content ?? labels.emptyEntryPreview ?? "(empty)";
-  return truncateText(typeof raw === "string" ? raw : String(raw), width, labels);
+  const text = typeof raw === "string" ? raw : String(raw);
+  return plainClipboardPreview(text);
+}
+
+export function entryPreview(entry: Entry, width: number, labels: Partial<Pick<TuiLabels, "emptyEntryPreview"> & TextFormatLabelSet> = {}): string {
+  return truncateText(entryBody(entry, labels), width, labels);
+}
+
+export function rowTrailing(entry: Entry, now = Date.now(), labels: Partial<EntryLabelSet> = {}): string {
+  const age = formatAge(entryActivityMs(entry), now, labels);
+  const source = (entry.source_app ?? "").trim();
+  if (source.length === 0) return age;
+  const short = source.length > 18 ? `${source.slice(0, 15)}...` : source;
+  return `${age} ${short}`;
+}
+
+export function contentRowLayout(available: number, kind: string, trailing: string): { kind: string; trailing: string; previewWidth: number } {
+  const width = Math.max(1, Math.floor(available));
+  let label = kind;
+  let trail = trailing;
+  const minPreview = 1;
+  const fits = () => label.length + (label.length > 0 ? 1 : 0) + (trail.length > 0 ? trail.length + 1 : 0) + minPreview <= width;
+  while (!fits() && (trail.length > 0 || label.length > 0)) {
+    if (trail.length > 0) trail = trail.slice(0, -1).trimEnd();
+    else label = label.slice(0, -1);
+  }
+  const used = label.length + (label.length > 0 ? 1 : 0) + (trail.length > 0 ? trail.length + 1 : 0);
+  return { kind: label, trailing: trail, previewWidth: Math.max(minPreview, width - used) };
+}
+
+export type HistoryRow = { kind: "divider"; title: string } | { kind: "entry"; entry: Entry; index: number };
+
+const historyDayMs = 86_400_000;
+
+export function historyAgeTitle(entry: Entry, now = Date.now()): string {
+  const age = Math.max(0, now - entryActivityMs(entry));
+  if (age < historyDayMs) return "today";
+  if (age < historyDayMs * 2) return "yesterday";
+  if (age < historyDayMs * 7) return "week";
+  return "older";
+}
+
+export function historyRows(
+  entries: Entry[],
+  titles: { pinned: string },
+  options: { now?: number; groupByAge?: boolean } = {},
+): HistoryRow[] {
+  const now = options.now ?? Date.now();
+  const groupByAge = options.groupByAge !== false;
+  const hasPinned = entries.some((entry) => entry.favorite);
+  const ages = new Set(entries.filter((entry) => !entry.favorite).map((entry) => historyAgeTitle(entry, now)));
+  const showAges = groupByAge && (ages.size > 1 || (hasPinned && ages.size > 0));
+  const rows: HistoryRow[] = [];
+  let openedPinned = false;
+  let lastAge = "";
+  entries.forEach((entry, index) => {
+    if (hasPinned && entry.favorite && !openedPinned && (showAges || entries.some((item) => !item.favorite))) {
+      rows.push({ kind: "divider", title: titles.pinned });
+      openedPinned = true;
+    }
+    if (showAges && !entry.favorite) {
+      const title = historyAgeTitle(entry, now);
+      if (title !== lastAge) {
+        rows.push({ kind: "divider", title });
+        lastAge = title;
+      }
+    }
+    rows.push({ kind: "entry", entry, index });
+  });
+  return rows;
+}
+
+export function visibleHistoryRows(
+  entries: Entry[],
+  selectedIndex: number,
+  maxRows: number,
+  titles: { pinned: string },
+  options: { now?: number; groupByAge?: boolean } = {},
+): HistoryRow[] {
+  const all = historyRows(entries, titles, options);
+  if (maxRows <= 0 || all.length === 0) return [];
+  const selected = all.findIndex((row) => row.kind === "entry" && row.index === selectedIndex);
+  const focus = selected >= 0 ? selected : 0;
+  const half = Math.floor(maxRows / 2);
+  const start = Math.min(Math.max(0, focus - half), Math.max(0, all.length - maxRows));
+  return all.slice(start, start + maxRows);
 }
 
 export function entryPreviewSegments(
@@ -449,9 +552,15 @@ export type WatcherStatusView = {
 export function watcherStatusView(status: WatcherStatus | null, labels: Partial<WatcherLabelSet>, now = Date.now()): WatcherStatusView {
   const text = { ...defaultWatcherLabels, ...labels };
   if (!status) return { text: watcherStatusText(text.watcherStoppedTemplate, text.watcherStopped, "", text), tone: "muted" };
-  if (status.last_error) return { text: watcherStatusText(text.watcherErrorTemplate, text.watcherStopped, "", text, status.last_error), tone: "error" };
   if (status.paused) return { text: watcherStatusText(text.watcherPausedTemplate, text.watcherPaused, watcherAge(status.last_seen_ms, now, text), text), tone: "warning" };
-  if (status.running) return { text: watcherStatusText(text.watcherRunningTemplate, text.watcherRunning, watcherAge(status.last_seen_ms, now, text), text), tone: "success" };
+  if (status.running) {
+    const live = watcherStatusText(text.watcherRunningTemplate, text.watcherRunning, watcherAge(status.last_seen_ms, now, text), text);
+    // A fresh heartbeat stays "watcher live". A real capture error is appended
+    // beside it; it does not relabel the daemon as stopped.
+    if (status.last_error) return { text: `${live}${text.watcherErrorSeparator}${status.last_error}`, tone: "warning" };
+    return { text: live, tone: "success" };
+  }
+  if (status.last_error) return { text: watcherStatusText(text.watcherErrorTemplate, text.watcherStopped, "", text, status.last_error), tone: "error" };
   if (status.last_seen_ms !== null) return { text: watcherStatusText(text.watcherStaleTemplate, text.watcherStale, watcherAge(status.last_seen_ms, now, text), text), tone: "warning" };
   return { text: watcherStatusText(text.watcherStoppedTemplate, text.watcherStopped, "", text), tone: "error" };
 }

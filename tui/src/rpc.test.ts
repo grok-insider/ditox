@@ -70,7 +70,10 @@ describe("rpc presentation", () => {
     chmodSync(fakeDitoxd, 0o755);
 
     const previousDitoxd = Bun.env.DITOXD;
+    const previousRuntime = Bun.env.XDG_RUNTIME_DIR;
     Bun.env.DITOXD = fakeDitoxd;
+    // A live ditoxd socket would answer before this fake binary runs.
+    Bun.env.XDG_RUNTIME_DIR = dir;
     try {
       await listEntries("needle", "images", 321);
       const request = parseFrame<{ method: string; params: { query: string; filter: string; limit: number } }>(readFileSync(capture, "utf8"));
@@ -79,6 +82,8 @@ describe("rpc presentation", () => {
     } finally {
       if (previousDitoxd === undefined) delete Bun.env.DITOXD;
       else Bun.env.DITOXD = previousDitoxd;
+      if (previousRuntime === undefined) delete Bun.env.XDG_RUNTIME_DIR;
+      else Bun.env.XDG_RUNTIME_DIR = previousRuntime;
       rmSync(dir, { recursive: true, force: true });
     }
   });

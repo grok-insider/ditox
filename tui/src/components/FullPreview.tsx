@@ -9,6 +9,9 @@ import type { Entry } from "../types";
 import { createImageBlockPreview } from "../use-image-block-preview";
 import { ImagePreviewRows } from "./ImagePreviewRows";
 import { imagePreviewBackground, imagePreviewNotice, previewBorderColor, previewContentColor, previewLineToneColor } from "./preview-shared";
+import { takeWheel } from "../mouse";
+import { RichPreview } from "./RichPreview";
+import { classifyPreview } from "../preview-syntax";
 import { fitGutter, justifyContent, verticalJustify } from "./style-utils";
 
 export function FullPreview(props: {
@@ -105,9 +108,10 @@ export function FullPreview(props: {
       bottomTitle={props.config.chrome.fullPreviewBorder && props.config.chrome.showFullPreviewBottomTitle ? bottomTitle() : undefined}
       bottomTitleAlignment={props.config.chrome.fullPreviewBottomTitleAlignment}
       onMouseScroll={(event: any) => {
-        const direction = scrollDirection(event);
+        const direction = takeWheel(event);
         if (!direction) return;
         event.preventDefault();
+        event.stopPropagation();
         props.onScroll(direction);
       }}
     >
@@ -140,7 +144,7 @@ export function FullPreview(props: {
           </box>
         )}
       </Show>
-      <box width="100%" flexGrow={1} flexDirection="column" justifyContent={verticalJustify(layout().fullPreviewBodyVerticalAlign)}>
+      <box width="100%" flexGrow={1} overflow="hidden" flexDirection="column" justifyContent={verticalJustify(layout().fullPreviewBodyVerticalAlign)}>
         <Show when={props.entry?.kind === "image" && blockPreview().kind === "rendered"}>
           <ImagePreviewRows
             preview={blockPreview()}
@@ -180,7 +184,10 @@ export function FullPreview(props: {
             </text>
           </box>
         </Show>
-        <For each={visible()}>
+        <Show
+          when={props.entry?.kind === "text" && classifyPreview(props.entry.content) !== "plain" ? props.entry : undefined}
+          fallback={
+            <For each={visible()}>
           {(line, index) => (
             <>
               <box height={1} flexDirection="row" backgroundColor={style().bg}>
@@ -204,6 +211,19 @@ export function FullPreview(props: {
             </>
           )}
         </For>
+          }
+        >
+          {(entry) => (
+            <RichPreview
+              content={entry().content}
+              height={visibleRows()}
+              fg={style().fg}
+              bg={style().bg}
+              scrollTop={props.offset}
+              theme={props.config.theme}
+            />
+          )}
+        </Show>
       </box>
     </box>
   );
@@ -219,12 +239,6 @@ function fullPreviewMetaDetails(config: ResolvedTuiConfig, entry: Entry): string
   return formatTemplate(labels.fullPreviewMetaDetailsTemplate, previewMetaTemplateValues(entry, labels, config.layout.fullPreviewMetaHashLength));
 }
 
-function scrollDirection(event: any): -1 | 1 | null {
-  if (event.scroll?.direction === "up") return -1;
-  if (event.scroll?.direction === "down") return 1;
-  if (event.button === 4) return -1;
-  if (event.button === 5) return 1;
-  return null;
-}
+
 
 

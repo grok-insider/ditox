@@ -1,5 +1,6 @@
-import { createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { render, useRenderer, useTerminalDimensions } from "@opentui/solid";
+import { withAppearance } from "./config/style";
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui";
 import { KeymapProvider } from "@opentui/keymap/solid";
 import {
@@ -19,7 +20,6 @@ import {
   selectThroughIndex,
   selectedIdsOrCurrent,
   selectedEntry,
-  selectedSetIncludesPinned,
   togglePinnedOnly,
   toggleSelectedId,
   visibleEntryCapacity,
@@ -41,7 +41,7 @@ import { HeaderBar } from "./components/HeaderBar";
 import { EntryList } from "./components/EntryList";
 import { PreviewPane } from "./components/PreviewPane";
 import { StatusLine } from "./components/StatusLine";
-import { ModeOverlay } from "./components/Overlay";
+import { helpCardSize, ModeOverlay } from "./components/Overlay";
 import { FullPreview } from "./components/FullPreview";
 import { setImageByteSource, type ImageProtocolCapabilities } from "./image-preview";
 import { useDitoxKeymap } from "./keymap";
@@ -71,10 +71,12 @@ function AppRoot(props: { config: ResolvedTuiConfig; initialUiState?: UiState })
 }
 
 export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiState } = {}) {
-  const config = props.config ?? currentTuiConfig();
+  const baseConfig = props.config ?? currentTuiConfig();
+  const [appearance, setAppearance] = createSignal<"dark" | "light" | null>(null);
+  const config = () => withAppearance(baseConfig, appearance());
   const renderer = useRenderer();
   const imageManager = new TerminalImageManager();
-  const [state, setState] = createSignal<UiState>(props.initialUiState ?? initialState(config.startup));
+  const [state, setState] = createSignal<UiState>(props.initialUiState ?? initialState(config().startup));
   const [terminalCapabilities, setTerminalCapabilities] = createSignal<TerminalCapabilities | null>(renderer.capabilities);
   // The terminal answers the pixel-resolution query asynchronously, so
   // renderer.resolution is a plain (non-reactive) getter that is null on first
@@ -85,27 +87,27 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
   const dimensions = useTerminalDimensions();
   const imageTerminal = (): TerminalImageState =>
     terminalImageState(dimensions().width, dimensions().height, resolution(), terminalCapabilities());
-  const contentWidth = () => Math.max(1, dimensions().width - config.layout.shellPaddingX * 2);
-  const contentHeight = () => Math.max(1, dimensions().height - config.layout.shellPaddingY * 2);
-  const overlayHeight = () => activeOverlayHeight(state(), config);
-  const headerRows = () => (config.layout.showHeader ? config.layout.headerHeight : 0);
-  const statusRows = () => (config.layout.showStatusLine ? config.layout.statusHeight : 0);
+  const contentWidth = () => Math.max(1, dimensions().width - config().layout.shellPaddingX * 2);
+  const contentHeight = () => Math.max(1, dimensions().height - config().layout.shellPaddingY * 2);
+  const overlayHeight = () => activeOverlayHeight(state(), config());
+  const headerRows = () => (config().layout.showHeader ? config().layout.headerHeight : 0);
+  const statusRows = () => (config().layout.showStatusLine ? config().layout.statusHeight : 0);
   const listRows = () => Math.max(1, contentHeight() - headerRows() - statusRows() - overlayHeight());
-  const visibleListEntries = () => visibleEntryCapacity(listInteriorRows(config, listRows()), config.layout.rowSpacing);
+  const visibleListEntries = () => visibleEntryCapacity(listInteriorRows(config(), listRows()), config().layout.rowSpacing);
   const splitPaneTotalWidth = () => Math.max(1, contentWidth());
   const splitPaneGap = () =>
-    config.layout.showPreviewPane ? Math.min(config.layout.splitPaneGap, Math.max(0, splitPaneTotalWidth() - config.layout.minPaneWidth * 2)) : 0;
+    config().layout.showPreviewPane ? Math.min(config().layout.splitPaneGap, Math.max(0, splitPaneTotalWidth() - config().layout.minPaneWidth * 2)) : 0;
   const splitPaneAvailableWidth = () => Math.max(1, splitPaneTotalWidth() - splitPaneGap());
-  const listPaneWidthPercent = () => (config.layout.showPreviewPane ? (config.layout.listWidthPercent * splitPaneAvailableWidth()) / splitPaneTotalWidth() : 100);
-  const previewPaneWidthPercent = () => (config.layout.showPreviewPane ? (config.layout.previewWidthPercent * splitPaneAvailableWidth()) / splitPaneTotalWidth() : 0);
+  const listPaneWidthPercent = () => (config().layout.showPreviewPane ? (config().layout.listWidthPercent * splitPaneAvailableWidth()) / splitPaneTotalWidth() : 100);
+  const previewPaneWidthPercent = () => (config().layout.showPreviewPane ? (config().layout.previewWidthPercent * splitPaneAvailableWidth()) / splitPaneTotalWidth() : 0);
   const rowWidth = () =>
-    config.layout.showPreviewPane
-      ? Math.max(config.layout.minPaneWidth, Math.floor((splitPaneAvailableWidth() * config.layout.listWidthPercent) / 100) - config.layout.splitPaneWidthInset)
-      : Math.max(config.layout.minPaneWidth, contentWidth());
-  const previewWidth = () => Math.max(config.layout.minPaneWidth, Math.floor((splitPaneAvailableWidth() * config.layout.previewWidthPercent) / 100) - config.layout.splitPaneWidthInset);
-  const fullPreviewWidth = () => layoutFullPreviewWidth(config, contentWidth());
-  const fullPreviewTextWidth = () => layoutFullPreviewTextWidth(config, contentWidth());
-  const previewVisibleRows = () => fullPreviewVisibleRows(selectedEntry(state()), config, listRows());
+    config().layout.showPreviewPane
+      ? Math.max(config().layout.minPaneWidth, Math.floor((splitPaneAvailableWidth() * config().layout.listWidthPercent) / 100) - config().layout.splitPaneWidthInset)
+      : Math.max(config().layout.minPaneWidth, contentWidth());
+  const previewWidth = () => Math.max(config().layout.minPaneWidth, Math.floor((splitPaneAvailableWidth() * config().layout.previewWidthPercent) / 100) - config().layout.splitPaneWidthInset);
+  const fullPreviewWidth = () => layoutFullPreviewWidth(config(), contentWidth());
+  const fullPreviewTextWidth = () => layoutFullPreviewTextWidth(config(), contentWidth());
+  const previewVisibleRows = () => fullPreviewVisibleRows(selectedEntry(state()), config(), listRows());
   let lastLiveSearchKey = "";
 
   async function refresh(next?: Partial<UiState>) {
@@ -113,8 +115,8 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     setState(current);
     try {
       const [result, watcher] = await Promise.all([
-        listEntries(current.query, current.pinnedOnly ? "favorites" : current.filter, config.layout.historyLimit, config.labels),
-        getWatcherStatus(config.labels),
+        listEntries(current.query, current.pinnedOnly ? "favorites" : current.filter, config().layout.historyLimit, config().labels),
+        getWatcherStatus(config().labels),
       ]);
       setState((previous) =>
         clampSelection({
@@ -122,7 +124,7 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
           ...next,
           entries: result.entries,
           watcher,
-          status: next?.status ?? formatEntriesStatus(result.entries.length, config.labels),
+          status: next?.status ?? formatEntriesStatus(result.entries.length, config().labels),
         }),
       );
     } catch (error) {
@@ -137,10 +139,10 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
       const result = await copyOrPasteEntry(entry.id, {
         paste,
         targetWindow: Bun.env.DITOX_TARGET_WINDOW,
-        labels: config.labels,
+        labels: config().labels,
       });
-      const status = result === "pasted" ? config.labels.statusPasted : config.labels.statusCopied;
-      const shouldExit = result === "pasted" ? config.behavior.exitAfterPaste : paste ? config.behavior.exitAfterPaste : config.behavior.exitAfterCopy;
+      const status = result === "pasted" ? config().labels.statusPasted : config().labels.statusCopied;
+      const shouldExit = result === "pasted" ? config().behavior.exitAfterPaste : paste ? config().behavior.exitAfterPaste : config().behavior.exitAfterCopy;
       if (shouldExit) {
         setState((previous) => ({ ...previous, status }));
         exitAfter(true, renderer);
@@ -163,12 +165,12 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     const ids = selectedIdsOrCurrent(state());
     if (ids.length === 0) return;
     try {
-      const result = ids.length === 1 ? await copyEntry(ids[0]!, config.labels) : await bulkCopyEntries(ids, config.labels);
+      const result = ids.length === 1 ? await copyEntry(ids[0]!, config().labels) : await bulkCopyEntries(ids, config().labels);
       setState((previous) => ({
         ...previous,
-        status: result.copied ? formatCopiedCountStatus(ids.length, config.labels) : config.labels.statusNothingCopied,
+        status: result.copied ? formatCopiedCountStatus(ids.length, config().labels) : config().labels.statusNothingCopied,
       }));
-      exitAfter(result.copied && config.behavior.exitAfterBulkCopy, renderer);
+      exitAfter(result.copied && config().behavior.exitAfterBulkCopy, renderer);
     } catch (error) {
       setState((previous) => ({ ...previous, status: error instanceof Error ? error.message : String(error) }));
     }
@@ -177,7 +179,7 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
   async function copySearchMatches() {
     const current = state();
     try {
-      const result = await listEntries(current.query, current.pinnedOnly ? "favorites" : current.filter, config.layout.historyLimit, config.labels);
+      const result = await listEntries(current.query, current.pinnedOnly ? "favorites" : current.filter, config().layout.historyLimit, config().labels);
       const ids = result.entries.map((entry) => entry.id);
       if (ids.length === 0) {
         setState((previous) =>
@@ -185,22 +187,22 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
             ...previous,
             entries: result.entries,
             selectedIds: new Set(),
-            status: config.labels.statusNothingCopied,
+            status: config().labels.statusNothingCopied,
           }),
         );
         return;
       }
 
-      const copyResult = ids.length === 1 ? await copyEntry(ids[0]!, config.labels) : await bulkCopyEntries(ids, config.labels);
+      const copyResult = ids.length === 1 ? await copyEntry(ids[0]!, config().labels) : await bulkCopyEntries(ids, config().labels);
       setState((previous) =>
         clampSelection({
           ...previous,
           entries: result.entries,
           selectedIds: new Set(ids),
-          status: copyResult.copied ? formatCopiedCountStatus(ids.length, config.labels) : config.labels.statusNothingCopied,
+          status: copyResult.copied ? formatCopiedCountStatus(ids.length, config().labels) : config().labels.statusNothingCopied,
         }),
       );
-      exitAfter(copyResult.copied && config.behavior.exitAfterSearchCopy, renderer);
+      exitAfter(copyResult.copied && config().behavior.exitAfterSearchCopy, renderer);
     } catch (error) {
       setState((previous) => ({ ...previous, status: error instanceof Error ? error.message : String(error) }));
     }
@@ -210,7 +212,7 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     const ids = selectedIdsOrCurrent(state());
     if (ids.length === 0) return;
     try {
-      const result = await outputEntries(ids, config.labels);
+      const result = await outputEntries(ids, config().labels);
       shutdownTui(renderer, {
         afterDestroy: () => {
           process.stdout.write(result.content);
@@ -227,8 +229,8 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     if (!entry) return;
     const nextFavorite = !entry.favorite;
     try {
-      await favoriteEntry(entry.id, nextFavorite, config.labels);
-      await refresh({ status: formatPinStatus(entry, nextFavorite, config.labels) });
+      await favoriteEntry(entry.id, nextFavorite, config().labels);
+      await refresh({ status: formatPinStatus(entry, nextFavorite, config().labels) });
     } catch (error) {
       setState((previous) => ({ ...previous, status: error instanceof Error ? error.message : String(error) }));
     }
@@ -239,18 +241,18 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     if (ids.length === 0) return;
     let deleted = 0;
     for (const id of ids) {
-      if ((await deleteEntry(id, config.labels)).deleted) deleted += 1;
+      if ((await deleteEntry(id, config().labels)).deleted) deleted += 1;
     }
-    await refresh({ mode: "browse", selectedIds: new Set(), status: formatDeletedStatus(deleted, config.labels) });
+    await refresh({ mode: "browse", selectedIds: new Set(), status: formatDeletedStatus(deleted, config().labels) });
   }
 
   async function confirmClear() {
     const current = state();
-    const result = await clearEntries(current.clearKind, current.clearPreserveFavorites, config.labels);
+    const result = await clearEntries(current.clearKind, current.clearPreserveFavorites, config().labels);
     await refresh({
       mode: "browse",
       selectedIds: new Set(),
-      status: formatClearedStatus(result.deleted, current.clearPreserveFavorites, config.labels),
+      status: formatClearedStatus(result.deleted, current.clearPreserveFavorites, config().labels),
     });
   }
 
@@ -261,7 +263,7 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
       selectedIndex: next.selectedIndex,
       selectedIds: next.selectedIds,
       previewOffset: next.previewOffset,
-      status: formatViewStatus(next.pinnedOnly, config.labels),
+      status: formatViewStatus(next.pinnedOnly, config().labels),
     });
   }
 
@@ -282,7 +284,7 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     confirmClear,
     togglePinnedView,
     openClear,
-    config,
+    config: config(),
     browsePageRows: visibleListEntries,
     previewRows: listRows,
     previewWrapWidth: fullPreviewTextWidth,
@@ -290,7 +292,7 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
 
   createEffect(() => {
     const current = state();
-    if (!config.behavior.liveSearch || current.mode !== "search") {
+    if (!config().behavior.liveSearch || current.mode !== "search") {
       lastLiveSearchKey = "";
       return;
     }
@@ -298,14 +300,24 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     if (key === lastLiveSearchKey) return;
     lastLiveSearchKey = key;
     const timer = setTimeout(() => {
-      void refresh({ status: state().status });
-    }, config.behavior.liveSearchDebounceMs);
+      void refresh();
+    }, config().behavior.liveSearchDebounceMs);
     onCleanup(() => clearTimeout(timer));
   });
 
   onMount(() => {
-    if (config.terminal.title !== null) renderer.setTerminalTitle(config.terminal.title);
-    const cursor = terminalCursorStyleOptions(config);
+    if (!baseConfig.themeLocked) {
+      const applyThemeMode = () => {
+        const mode = renderer.themeMode;
+        if (mode === "dark" || mode === "light") setAppearance(mode);
+      };
+      applyThemeMode();
+      renderer.on(CliRenderEvents.THEME_MODE, applyThemeMode);
+      onCleanup(() => renderer.off(CliRenderEvents.THEME_MODE, applyThemeMode));
+    }
+    const title = config().terminal.title;
+    if (title !== null) renderer.setTerminalTitle(title);
+    const cursor = terminalCursorStyleOptions(config());
     if (cursor) renderer.setCursorStyle(cursor);
     const updateCapabilities = (capabilities: TerminalCapabilities) => setTerminalCapabilities(capabilities);
     renderer.on(CliRenderEvents.CAPABILITIES, updateCapabilities);
@@ -348,7 +360,7 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     // run() preloads the first screenful before rendering; only fetch here
     // when the App was mounted without preloaded state (e.g. in tests).
     if (!props.initialUiState) void refresh();
-    if (config.layout.refreshIntervalMs <= 0) return;
+    if (config().layout.refreshIntervalMs <= 0) return;
     let polling = false;
     const timer = setInterval(() => {
       if (polling || state().mode !== "browse") return;
@@ -356,19 +368,32 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
       void refresh({ status: state().status }).finally(() => {
         polling = false;
       });
-    }, config.layout.refreshIntervalMs);
+    }, config().layout.refreshIntervalMs);
     onCleanup(() => clearInterval(timer));
   });
   onCleanup(() => imageManager.destroy());
+  createEffect(() => {
+    if (baseConfig.themeLocked) return;
+    renderer.setBackgroundColor(surface(config(), "shell").bg);
+  });
+  const veiledMode = () => {
+    const mode = state().mode;
+    return mode === "confirm-delete" || mode === "confirm-clear" || mode === "search" || mode === "help";
+  };
+  createEffect(() => {
+    imageManager.setOverlayHold(veiledMode());
+  });
+  const helpCard = () => helpCardSize(config(), contentWidth(), contentHeight());
+  const veilOverlayWidth = () => (state().mode === "help" ? helpCard().width : Math.min(72, contentWidth()));
 
   return (
     <AppFrame
-      config={config}
-      header={config.layout.showHeader ? <HeaderBar config={config} state={state()} selectedCount={state().selectedIds.size} width={contentWidth()} /> : null}
+      config={config()}
+      header={config().layout.showHeader ? <HeaderBar config={config()} state={state()} selectedCount={state().selectedIds.size} width={contentWidth()} /> : null}
       content={
         state().mode === "preview" ? (
           <FullPreview
-            config={config}
+            config={config()}
             entry={selectedEntry(state())}
             rows={listRows()}
             width={fullPreviewWidth()}
@@ -380,17 +405,17 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
               setState((previous) =>
                 movePreview(
                   previous,
-                  direction * config.layout.mouseScrollRows,
-                  previewModel(selectedEntry(previous), config.layout.maxFullPreviewLines, config.labels, config.layout, fullPreviewTextWidth()).length,
+                  direction * config().layout.mouseScrollRows,
+                  previewModel(selectedEntry(previous), config().layout.maxFullPreviewLines, config().labels, config().layout, fullPreviewTextWidth()).length,
                   previewVisibleRows(),
                 ),
               )
             }
           />
         ) : (
-          <box flexDirection="row" flexGrow={1} backgroundColor={surface(config, "shell").bg}>
+          <box flexDirection="row" flexGrow={1} backgroundColor={surface(config(), "shell").bg}>
             <EntryList
-              config={config}
+              config={config()}
               entries={state().entries}
               selectedIndex={state().selectedIndex}
               selectedIds={state().selectedIds}
@@ -405,12 +430,12 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
                   return options.toggle ? toggleSelectedId(next) : next;
                 })
               }
-              onScroll={(direction) => setState((previous) => moveSelection(previous, direction * config.layout.mouseScrollRows))}
+              onScroll={(direction) => setState((previous) => moveSelection(previous, direction * config().layout.mouseScrollRows))}
             />
-            {config.layout.showPreviewPane && splitPaneGap() > 0 ? <box width={splitPaneGap()} flexShrink={0} backgroundColor={surface(config, "splitPaneGap").bg} /> : null}
-            {config.layout.showPreviewPane ? (
+            {config().layout.showPreviewPane && splitPaneGap() > 0 ? <box width={splitPaneGap()} flexShrink={0} backgroundColor={surface(config(), "splitPaneGap").bg} /> : null}
+            {config().layout.showPreviewPane ? (
               <PreviewPane
-                config={config}
+                config={config()}
                 entry={selectedEntry(state())}
                 rows={listRows()}
                 width={previewWidth()}
@@ -423,8 +448,14 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
           </box>
         )
       }
-      status={config.layout.showStatusLine ? <StatusLine config={config} status={state().status} watcher={state().watcher} width={contentWidth()} mode={statusHintMode(state().mode)} /> : null}
-      overlay={<ModeOverlay config={config} state={state()} width={contentWidth()} />}
+      status={config().layout.showStatusLine ? <StatusLine config={config()} status={state().status} watcher={state().watcher} width={contentWidth()} mode={statusHintMode(state().mode)} /> : null}
+      overlay={veiledMode() ? null : <ModeOverlay config={config()} state={state()} width={contentWidth()} />}
+      veil={
+        veiledMode() ? (
+          <ModeOverlay config={config()} state={state()} width={veilOverlayWidth()} height={state().mode === "help" ? helpCard().height : undefined} />
+        ) : null
+      }
+      veilWidth={state().mode === "help" ? helpCard().width : undefined}
     />
   );
 }
@@ -435,6 +466,8 @@ export function AppFrame(props: {
   content: JSX.Element;
   status?: JSX.Element;
   overlay?: JSX.Element;
+  veil?: JSX.Element | null;
+  veilWidth?: number;
 }) {
   const topOverlay = () => (props.config.layout.overlayPlacement === "top" ? props.overlay : null);
   const bottomOverlay = () => (props.config.layout.overlayPlacement === "bottom" ? props.overlay : null);
@@ -445,6 +478,14 @@ export function AppFrame(props: {
       {props.content}
       {props.status}
       {bottomOverlay()}
+      <Show when={props.veil}>
+        <box position="absolute" width="100%" height="100%" backgroundColor="#000000" opacity={0.5} zIndex={30} />
+        <box position="absolute" width="100%" height="100%" zIndex={31} flexDirection="column" justifyContent="center" alignItems="center">
+          <box width={props.veilWidth ?? "70%"} backgroundColor={surface(props.config, "dangerOverlay").bg}>
+            {props.veil}
+          </box>
+        </box>
+      </Show>
     </Shell>
   );
 }
@@ -514,13 +555,8 @@ function isPasteBackFailure(error: unknown, labels: ResolvedTuiConfig["labels"])
   return message === labels.errorPasteBackFailed || message.includes("PasteBackFailed");
 }
 
-function activeOverlayHeight(state: UiState, config: ResolvedTuiConfig): number {
-  if (state.mode === "help") return config.layout.helpOverlayHeight;
-  if (state.mode === "confirm-delete") {
-    return config.layout.confirmOverlayHeight + (selectedSetIncludesPinned(state) ? config.layout.confirmPinnedExtraRows : 0);
-  }
-  if (state.mode === "confirm-clear") return config.layout.clearOverlayHeight;
-  if (state.mode === "search") return config.layout.searchOverlayHeight;
+function activeOverlayHeight(state: UiState, _config: ResolvedTuiConfig): number {
+  if (state.mode === "confirm-delete" || state.mode === "confirm-clear" || state.mode === "search" || state.mode === "help") return 0;
   return 0;
 }
 

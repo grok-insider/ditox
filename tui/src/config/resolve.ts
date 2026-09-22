@@ -306,7 +306,7 @@ export function resolveTuiConfig(fileConfig: TuiConfigFile = {}, env: EnvMap = {
       24,
       10000,
     ),
-    historyLimit: clampNumber(envNumber(env, "DITOX_TUI_HISTORY_LIMIT", numberValue(fileConfig.layout?.historyLimit, defaultLayout.historyLimit)), 1, 500),
+    historyLimit: clampNumber(envNumber(env, "DITOX_TUI_HISTORY_LIMIT", numberValue(fileConfig.layout?.historyLimit, defaultLayout.historyLimit)), 1, 1000),
     imagePreviewMode,
     fullPreviewImageMode: imagePreviewModeValue(
       env.DITOX_TUI_FULL_PREVIEW_IMAGE_MODE,
@@ -740,6 +740,7 @@ export function resolveTuiConfig(fileConfig: TuiConfigFile = {}, env: EnvMap = {
   return {
     sourcePath,
     theme,
+    themeLocked: themeIsLocked(fileConfig.theme, env),
     terminal,
     layout,
     chrome: mergeChrome(fileConfig.chrome),
@@ -1127,6 +1128,12 @@ function themePreset(theme: TuiConfigFile["theme"], env: EnvMap): ThemeName {
   if (isThemeName(theme)) return theme;
   if (typeof theme === "object" && isThemeName(theme?.preset)) return theme.preset;
   return "grokbuild";
+}
+
+function themeIsLocked(theme: TuiConfigFile["theme"], env: EnvMap): boolean {
+  if (isThemeName(env.DITOX_TUI_THEME)) return true;
+  if (isThemeName(theme)) return true;
+  return typeof theme === "object" && (isThemeName(theme?.preset) || theme?.colors != null);
 }
 
 function isThemeName(value: unknown): value is ThemeName {

@@ -1,9 +1,10 @@
 import { For, Show } from "solid-js";
-import { entryAccent, entryMeta, entryPreviewSegments, fitRowMeta, scrollbarCells } from "../presentation";
+import { contentRowLayout, entryAccent, entryKindLabel, entryMeta, entryPreviewSegments, fitRowMeta, rowTrailing, scrollbarCells, visibleHistoryRows, type HistoryRow } from "../presentation";
 import { listInteriorRows } from "../layout";
-import { visibleEntries, visibleEntryCapacity } from "../state";
+import { visibleEntryCapacity } from "../state";
 import type { ContentAlign } from "../ui-config";
 import {
+  defaultLabels,
   formatTemplate,
   paddedTitle,
   surface,
@@ -13,6 +14,7 @@ import {
   type TuiSurfaceStyle,
 } from "../tui-config";
 import type { Entry } from "../types";
+import { takeWheel } from "../mouse";
 import { configuredToneColor, fitCell, justifyContent, verticalJustify } from "./style-utils";
 
 export function EntryList(props: {
@@ -33,7 +35,14 @@ export function EntryList(props: {
   const chrome = () => props.config.chrome;
   const interiorRows = () => listInteriorRows(props.config, props.rows);
   const visibleCount = () => visibleEntryCapacity(interiorRows(), layout().rowSpacing);
-  const visible = () => visibleEntries(props.entries, props.selectedIndex, visibleCount());
+  const visible = () =>
+    visibleHistoryRows(
+      props.entries,
+      props.selectedIndex,
+      visibleCount(),
+      { pinned: props.config.labels.pinnedViewTitle },
+      { groupByAge: props.query.trim().length === 0 },
+    );
   return (
     <box
       width={`${props.widthPercent ?? layout().listWidthPercent}%`}
@@ -60,9 +69,10 @@ export function EntryList(props: {
       }
       bottomTitleAlignment={chrome().listBottomTitleAlignment}
       onMouseScroll={(event: any) => {
-        const direction = scrollDirection(event);
+        const direction = takeWheel(event);
         if (!direction) return;
         event.preventDefault();
+        event.stopPropagation();
         props.onScroll(direction);
       }}
     >
@@ -78,20 +88,14 @@ export function EntryList(props: {
             <For each={visible()}>
               {(row, index) => (
                 <>
-                  <EntryRow
+                  <HistoryLine
                     config={props.config}
-                    entry={row.entry}
-                    index={row.index}
+                    row={row}
                     width={props.width}
                     query={props.query}
-                    selected={row.index === props.selectedIndex}
-                    marked={props.selectedIds.has(row.entry.id)}
-                    onMouseDown={(event: any) => {
-                      const options = entryMouseSelectionOptions(event);
-                      if (!options) return;
-                      event.preventDefault();
-                      props.onSelectEntry(row.index, options);
-                    }}
+                    selected={row.kind === "entry" && row.index === props.selectedIndex}
+                    marked={row.kind === "entry" && props.selectedIds.has(row.entry.id)}
+                    onSelectEntry={props.onSelectEntry}
                   />
                   <Show when={layout().rowSpacing > 0 && index() < visible().length - 1}>
                     <box width="100%" height={layout().rowSpacing} backgroundColor={rowSpacerStyle().bg} />
@@ -106,6 +110,44 @@ export function EntryList(props: {
         </box>
       </Show>
     </box>
+  );
+}
+
+function HistoryLine(props: {
+  config: ResolvedTuiConfig;
+  row: HistoryRow;
+  width: number;
+  query: string;
+  selected: boolean;
+  marked: boolean;
+  onSelectEntry: (index: number, options: { extend: boolean; toggle: boolean }) => void;
+}) {
+  const style = () => surface(props.config, "list");
+  if (props.row.kind === "divider") {
+    return (
+      <box height={1} width="100%" backgroundColor={style().bg}>
+        <text style={textStyle(style(), style().muted)}>{props.row.title}</text>
+      </box>
+    );
+  }
+  const entry = props.row.entry;
+  const index = props.row.index;
+  return (
+    <EntryRow
+      config={props.config}
+      entry={entry}
+      index={index}
+      width={props.width}
+      query={props.query}
+      selected={props.selected}
+      marked={props.marked}
+      onMouseDown={(event: any) => {
+        const options = entryMouseSelectionOptions(event);
+        if (!options) return;
+        event.preventDefault();
+        props.onSelectEntry(index, options);
+      }}
+    />
   );
 }
 
@@ -151,6 +193,49 @@ function EntryRow(props: {
   };
   const previewSegments = () => entryPreviewSegments(props.entry, previewWidth(), highlightQuery(), props.config.labels);
   const previewPadding = () => alignmentPadding(layout().rowPreviewAlign, previewWidth(), previewSegments().reduce((length, segment) => length + (segment?.text?.length ?? 0), 0));
+  const contentFirst = () => props.config.labels.rowMetaTemplate === defaultLabels.rowMetaTemplate;
+  const contentFit = () => {
+    const border = props.config.chrome.listBorder ? 2 : 0;
+    const padding = props.config.layout.listPaddingX * 2;
+    const scrollbar = props.config.layout.showScrollbar ? props.config.layout.scrollbarWidth : 0;
+    const available = Math.max(1, props.width - border - padding - scrollbar - rowPrefixWidth());
+    if (!layout().showRowMetadata) return { kind: "", trailing: "", previewWidth: available };
+    return contentRowLayout(available, entryKindLabel(props.entry, props.config.labels), rowTrailing(props.entry, Date.now(), props.config.labels));
+  };
+  const contentPreviewWidth = () => {
+    const cap = layout().rowPreviewMaxWidth;
+    const fitted = contentFit().previewWidth;
+    return cap > 0 ? Math.min(fitted, cap) : fitted;
+  };
+  const contentSegments = () => entryPreviewSegments(props.entry, contentPreviewWidth(), highlightQuery(), props.config.labels);
+  if (contentFirst()) {
+    return (
+      <box height={1} width="100%" flexDirection="row" backgroundColor={bg()} onMouseDown={props.onMouseDown}>
+        <text style={textStyle(rowStyle(), listContentColor(props.config, rowStyle(), props.entry, "preview"))}>
+          <span style={textStyle(rowStyle(), listContentColor(props.config, rowStyle(), props.entry, "marker"))}>
+            {fitCell(marker(), markerCellWidth(), layout().rowMarkerAlign)}
+          </span>
+          <span style={textStyle(rowStyle(), listContentColor(props.config, rowStyle(), props.entry, "markerGap"))}>{" ".repeat(layout().rowMarkerGap)}</span>
+          <span style={textStyle(rowStyle(), listContentColor(props.config, rowStyle(), props.entry, "metadata"))}>
+            {layout().showRowMetadata ? contentFit().kind : ""}
+          </span>
+          <span style={textStyle(rowStyle(), listContentColor(props.config, rowStyle(), props.entry, "metadataGap"))}>
+            {layout().showRowMetadata && contentFit().kind.length > 0 ? " " : ""}
+          </span>
+          <For each={contentSegments()}>
+            {(segment) => (
+              <span style={textStyle(rowStyle(), listContentColor(props.config, rowStyle(), props.entry, segment.match ? "searchMatch" : "preview"))}>
+                {segment.text}
+              </span>
+            )}
+          </For>
+          <span style={textStyle(rowStyle(), listContentColor(props.config, rowStyle(), props.entry, "metadataGap"))}>
+            {layout().showRowMetadata && contentFit().trailing.length > 0 ? ` ${contentFit().trailing}` : ""}
+          </span>
+        </text>
+      </box>
+    );
+  }
   return (
     <box height={1} width="100%" flexDirection="row" justifyContent={justifyContent(layout().rowContentAlign)} backgroundColor={bg()} onMouseDown={props.onMouseDown}>
       <text style={textStyle(rowStyle(), listContentColor(props.config, rowStyle(), props.entry, "preview"))}>
@@ -182,14 +267,6 @@ function listPositionTitle(config: ResolvedTuiConfig, selectedIndex: number, tot
     index: selectedIndex + 1,
     total,
   });
-}
-
-function scrollDirection(event: any): -1 | 1 | null {
-  if (event.scroll?.direction === "up") return -1;
-  if (event.scroll?.direction === "down") return 1;
-  if (event.button === 4) return -1;
-  if (event.button === 5) return 1;
-  return null;
 }
 
 export function entryMouseSelectionOptions(event: any): { extend: boolean; toggle: boolean } | null {

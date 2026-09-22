@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { helpRows, loadTuiConfig, normalizeKey, resolveTuiConfig, statusHint, surface, templateSegments } from "./tui-config";
+import { withAppearance } from "./config/style";
+import { fittedStatusHint, helpRows, loadTuiConfig, normalizeKey, resolveTuiConfig, statusHint, surface, templateSegments } from "./tui-config";
 import { themeNames, themes } from "./theme";
 import { terminalCursorStyleOptions, tuiRenderOptions } from "./App";
 
@@ -46,7 +47,7 @@ describe("tui config", () => {
     expect(config.layout.listWidthPercent).toBe(46);
     expect(config.layout.previewWidthPercent).toBe(54);
     expect(config.layout.maxFullPreviewLines).toBe(2000);
-    expect(config.layout.historyLimit).toBe(100);
+    expect(config.layout.historyLimit).toBe(1000);
     expect(config.layout.imagePreviewMode).toBe("blocks");
     expect(config.layout.fullPreviewImageMode).toBe("blocks");
     expect(config.layout.imagePreviewMaxWidth).toBe(80);
@@ -66,9 +67,9 @@ describe("tui config", () => {
     expect(config.layout.showHeader).toBe(true);
     expect(config.layout.showStatusLine).toBe(true);
     expect(config.layout.searchOverlayHeight).toBe(3);
-    expect(config.layout.confirmOverlayHeight).toBe(3);
+    expect(config.layout.confirmOverlayHeight).toBe(4);
     expect(config.layout.confirmPinnedExtraRows).toBe(1);
-    expect(config.layout.clearOverlayHeight).toBe(4);
+    expect(config.layout.clearOverlayHeight).toBe(5);
     expect(config.layout.helpOverlayHeight).toBe(12);
     expect(config.layout.minPaneWidth).toBe(24);
     expect(config.layout.splitPaneGap).toBe(1);
@@ -190,8 +191,11 @@ describe("tui config", () => {
     expect(config.layout.rowSpacing).toBe(0);
     expect(config.layout.alternateRows).toBe(true);
     expect(config.layout.refreshIntervalMs).toBe(1000);
+    expect(config.themeLocked).toBe(false);
+    expect(withAppearance(config, "light").theme.name).toBe("ditoxLight");
+    expect(withAppearance(resolveTuiConfig({ theme: "tokyonight" }), "light").theme.name).toBe("tokyonight");
     expect(config.layout.mouseEnabled).toBe(true);
-    expect(config.layout.mouseScrollRows).toBe(3);
+    expect(config.layout.mouseScrollRows).toBe(1);
     expect(config.layout.showScrollbar).toBe(true);
     expect(config.layout.scrollbarWidth).toBe(1);
     expect(config.layout.scrollbarPlacement).toBe("right");
@@ -1609,7 +1613,7 @@ describe("tui config", () => {
     expect(config.layout.previewWidthPercent).toBe(32);
     expect(config.layout.maxPreviewLines).toBe(120);
     expect(config.layout.maxFullPreviewLines).toBe(24);
-    expect(config.layout.historyLimit).toBe(500);
+    expect(config.layout.historyLimit).toBe(999);
     expect(config.layout.imagePreviewMode).toBe("metadata");
     expect(config.layout.fullPreviewImageMode).toBe("sixel");
     expect(config.layout.imagePreviewMaxWidth).toBe(120);
@@ -2257,6 +2261,8 @@ describe("tui config", () => {
     });
 
     expect(statusHint(config)).toBe("tab:cycle|shift+tab:saved|d / bksp:remove|o:print|q  ctrl+c:exit");
+    expect(fittedStatusHint(resolveTuiConfig(), 45)).toBe("enter paste ctrl+y copy space / right preview");
+    expect(fittedStatusHint(resolveTuiConfig(), 44)).toBe("enter paste ctrl+y copy");
     expect(statusHint(config, "search")).toBe("ret:go|bs:erase|ctrl+s:yank|esc:stop");
     expect(statusHint(config, "preview")).toBe("esc:return|k  j  u  d:move");
     expect(statusHint(config, "confirm")).toBe("yes:commit|no:abort");

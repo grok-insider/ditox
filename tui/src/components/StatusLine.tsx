@@ -2,7 +2,8 @@ import { For } from "solid-js";
 import { statusTone, truncateText, watcherStatusView } from "../presentation";
 import {
   paddedTitle,
-  statusHint,
+  fittedStatusHint,
+  fittedStatusHintSpans,
   surface,
   templateSegments,
   textStyle,
@@ -25,14 +26,15 @@ export function StatusLine(props: { config: ResolvedTuiConfig; status: string; w
     fittedStatusLineValues(
       props.config,
       {
-        hint: statusHint(props.config, props.mode ?? "browse"),
         separator: separatorText(),
         watcher: watcher().text,
         operation: operationText(),
       },
       Math.max(0, props.width - props.config.layout.statusPaddingX * 2),
+      props.mode ?? "browse",
     );
   const lineParts = () => templateSegments(props.config.labels.statusLineTemplate, lineValues());
+  const hintSpans = () => fittedStatusHintSpans(props.config, lineValues().hint.length, props.mode ?? "browse");
   return (
     <box
       height={props.config.layout.statusHeight}
@@ -53,7 +55,19 @@ export function StatusLine(props: { config: ResolvedTuiConfig; status: string; w
         <box width="100%" flexDirection="row" justifyContent={justifyContent(props.config.layout.statusContentAlign)}>
           <text style={textStyle(style(), style().muted)}>
             <For each={lineParts()}>
-              {(part) => <span style={textStyle(style(), statusPartColor(props.config, part.key, watcherTone(), operationTone()))}>{part.text}</span>}
+              {(part) =>
+                part.key === "hint" ? (
+                  <For each={hintSpans()}>
+                    {(span) => (
+                      <span style={textStyle(style(), span.role === "keys" ? style().accent : statusPartColor(props.config, "hint", watcherTone(), operationTone()))}>
+                        {span.text}
+                      </span>
+                    )}
+                  </For>
+                ) : (
+                  <span style={textStyle(style(), statusPartColor(props.config, part.key, watcherTone(), operationTone()))}>{part.text}</span>
+                )
+              }
             </For>
           </text>
         </box>
@@ -65,14 +79,23 @@ export function StatusLine(props: { config: ResolvedTuiConfig; status: string; w
 type StatusTone = "muted" | "error" | "success" | "warning";
 type StatusLineValues = Record<"hint" | "separator" | "watcher" | "operation", string>;
 
-function fittedStatusLineValues(config: ResolvedTuiConfig, values: StatusLineValues, width: number): StatusLineValues {
-  const fitted = {
+function fittedStatusLineValues(
+  config: ResolvedTuiConfig,
+  values: Omit<StatusLineValues, "hint">,
+  width: number,
+  mode: TuiStatusHintMode,
+): StatusLineValues {
+  const fitted: StatusLineValues = {
     ...values,
     operation: configuredMax(values.operation, config.layout.statusOperationMaxWidth, config),
     watcher: configuredMax(values.watcher, config.layout.statusWatcherMaxWidth, config),
-    hint: configuredMax(values.hint, config.layout.statusHintMaxWidth, config),
+    hint: "",
   };
-  const shrinkOrder: Array<keyof StatusLineValues> = ["hint", "watcher", "operation"];
+  const used = templateWidth(config.labels.statusLineTemplate, fitted);
+  let hintRoom = Math.max(0, width - used);
+  if (config.layout.statusHintMaxWidth > 0) hintRoom = Math.min(hintRoom, config.layout.statusHintMaxWidth);
+  fitted.hint = fittedStatusHint(config, hintRoom, mode);
+  const shrinkOrder: Array<keyof StatusLineValues> = ["watcher", "operation"];
   for (const key of shrinkOrder) {
     const overflow = templateWidth(config.labels.statusLineTemplate, fitted) - width;
     if (overflow <= 0) break;

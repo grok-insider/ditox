@@ -16,7 +16,7 @@ import {
 } from "../tui-config";
 import { configuredMax, configuredToneColor, fitHelpKey, justifyContent, templateWidth, verticalJustify } from "./style-utils";
 
-export function ModeOverlay(props: { config: ResolvedTuiConfig; state: UiState; width?: number }) {
+export function ModeOverlay(props: { config: ResolvedTuiConfig; state: UiState; width?: number; height?: number }) {
   const searchStyle = () => overlaySurface(props.config, "search");
   const dangerStyle = () => overlaySurface(props.config, "danger");
   const helpStyle = () => overlaySurface(props.config, "command");
@@ -76,7 +76,8 @@ export function ModeOverlay(props: { config: ResolvedTuiConfig; state: UiState; 
   const dangerHint = (value: string) => fitOverlayText(value, props.config.layout.dangerOverlayHintMaxWidth, dangerWidth(), props.config);
   const helpAction = (value: string, width: number) => fitOverlayText(value, props.config.layout.helpOverlayActionMaxWidth, width, props.config);
   const deletingPinned = () => selectedSetIncludesPinned(props.state);
-  const helpColumnsView = () => helpColumns(props.config, helpWidth(), props.width !== undefined);
+  const helpFrameHeight = () => props.height ?? props.config.layout.helpOverlayHeight;
+  const helpColumnsView = () => helpColumns(props.config, helpWidth(), props.width !== undefined, helpFrameHeight());
   return (
     <>
       <Show when={props.state.mode === "search"}>
@@ -141,7 +142,7 @@ export function ModeOverlay(props: { config: ResolvedTuiConfig; state: UiState; 
         </OverlayFrame>
       </Show>
       <Show when={props.state.mode === "help"}>
-        <OverlayFrame config={props.config} title={labels().helpTitle} height={props.config.layout.helpOverlayHeight} tone="command">
+        <OverlayFrame config={props.config} title={labels().helpTitle} height={helpFrameHeight()} tone="command">
           <box width="100%" flexDirection="row" justifyContent={justifyContent(overlayContentAlign(props.config, "command"))}>
             <For each={helpColumnsView()}>
               {(column, columnIndex) => (
@@ -213,10 +214,36 @@ function OverlayLine(props: { config: ResolvedTuiConfig; tone: TuiOverlayToneNam
 type HelpRow = { keys: string; action: string };
 type HelpColumn = { rows: HelpRow[]; width: number; keyWidth: number; actionWidth: number };
 
-function helpColumns(config: ResolvedTuiConfig, width: number, knownWidth: boolean): HelpColumn[] {
+export function helpCardSize(config: ResolvedTuiConfig, maxWidth: number, maxHeight: number): { width: number; height: number } {
+  const rows = helpRows(config);
+  const limitWidth = Math.max(1, Math.floor(maxWidth));
+  const limitHeight = Math.max(1, Math.floor(maxHeight));
+  const configuredHeight = Math.min(config.layout.helpOverlayHeight, limitHeight);
+  if (rows.length === 0) return { width: Math.min(limitWidth, 72), height: configuredHeight };
+
+  const preferredSlots = Math.max(1, rowSlotsForHeight(config, config.layout.helpOverlayHeight));
+  const preferredColumns = Math.min(3, Math.max(1, Math.ceil(rows.length / preferredSlots)));
+  const order = [preferredColumns];
+  for (let columns = preferredColumns - 1; columns >= 1; columns -= 1) order.push(columns);
+  for (let columns = preferredColumns + 1; columns <= 3; columns += 1) order.push(columns);
+
+  for (const columns of order) {
+    const rowsPerColumn = Math.ceil(rows.length / columns);
+    const height = heightForHelpRows(config, rowsPerColumn);
+    if (height > limitHeight) continue;
+    const chunks: HelpRow[][] = [];
+    for (let start = 0; start < rows.length; start += rowsPerColumn) chunks.push(rows.slice(start, start + rowsPerColumn));
+    const width = helpFrameWidth(config, chunks);
+    if (width <= limitWidth) return { width, height };
+  }
+
+  return { width: limitWidth, height: configuredHeight };
+}
+
+function helpColumns(config: ResolvedTuiConfig, width: number, knownWidth: boolean, frameHeight = config.layout.helpOverlayHeight): HelpColumn[] {
   const rows = helpRows(config);
   if (rows.length === 0) return [];
-  const capacity = overlayContentRows(config, "command", config.layout.helpOverlayHeight);
+  const capacity = overlayContentRows(config, "command", frameHeight);
   const spacing = overlayLineSpacing(config, "command");
   const rowSlots = helpRowSlots(capacity, spacing);
   const gap = helpColumnGap(width);
@@ -291,6 +318,33 @@ function distributeByNeed(needs: number[], available: number): number[] {
 
 function helpRowSlots(capacity: number, spacing: number): number {
   return Math.max(1, Math.floor((Math.max(0, capacity) + Math.max(0, spacing)) / (1 + Math.max(0, spacing))));
+}
+
+function rowSlotsForHeight(config: ResolvedTuiConfig, height: number): number {
+  return helpRowSlots(overlayContentRows(config, "command", height), overlayLineSpacing(config, "command"));
+}
+
+function heightForHelpRows(config: ResolvedTuiConfig, rows: number): number {
+  const spacing = overlayLineSpacing(config, "command");
+  const contentRows = rows + Math.max(0, rows - 1) * spacing;
+  return contentRows + overlayPaddingY(config, "command") * 2 + (overlayBorderVisible(config, "command") ? 2 : 0);
+}
+
+function helpFrameWidth(config: ResolvedTuiConfig, chunks: HelpRow[][]): number {
+  const natural = chunks.map((chunk) => {
+    const keyWidth = helpKeyColumnWidth(config, chunk, Number.MAX_SAFE_INTEGER, true);
+    return Math.max(1, keyWidth + naturalHelpActionWidth(config, chunk));
+  });
+  const total = natural.reduce((sum, next) => sum + next, 0);
+  const gaps = Math.max(0, chunks.length - 1);
+  let gap = helpColumnGap(total + 3 * gaps);
+  let content = total + gap * gaps;
+  if (helpColumnGap(content) !== gap) {
+    gap = helpColumnGap(content);
+    content = total + gap * gaps;
+  }
+  const border = overlayBorderVisible(config, "command") ? 2 : 0;
+  return content + overlayPaddingX(config, "command") * 2 + border;
 }
 
 function helpColumnGap(width: number): number {

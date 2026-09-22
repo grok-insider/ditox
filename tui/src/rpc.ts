@@ -38,7 +38,7 @@ export class RpcError extends Error {
   }
 }
 
-export async function listEntries(query: string, filter: EntryFilter, limit = 100, labels?: Partial<RpcErrorLabelSet>): Promise<ListResponse> {
+export async function listEntries(query: string, filter: EntryFilter, limit = 1000, labels?: Partial<RpcErrorLabelSet>): Promise<ListResponse> {
   return call<ListResponse>("entries.list", { query, filter, limit }, labels);
 }
 
@@ -185,10 +185,97 @@ class RpcConnection {
   }
 }
 
-let connection: RpcConnection | null = null;
+let connection: RpcConnection | SocketRpc | null = null;
 
-function getConnection(labels?: Partial<RpcErrorLabelSet>): RpcConnection {
+function rpcSocketPath(): string | null {
+  const runtime = Bun.env.XDG_RUNTIME_DIR;
+  if (!runtime) return null;
+  return `${runtime}/ditox/rpc.sock`;
+}
+
+class SocketRpc {
+  private buffer: Buffer = Buffer.alloc(0);
+  private readonly queue: PendingRequest[] = [];
+  private failure: { exitCode: number | null } | null = null;
+  private socket: import("bun").Socket | null = null;
+
+  static async open(path: string): Promise<SocketRpc | null> {
+    const rpc = new SocketRpc();
+    try {
+      rpc.socket = await Bun.connect({
+        unix: path,
+        socket: {
+          data(_socket, data) {
+            rpc.buffer = Buffer.concat([rpc.buffer, Buffer.from(data)]);
+            rpc.drainFrames();
+          },
+          close() {
+            rpc.handleExit(null);
+          },
+          error() {
+            rpc.handleExit(1);
+          },
+          open() {},
+        },
+      });
+      return rpc;
+    } catch {
+      return null;
+    }
+  }
+
+  get alive(): boolean {
+    return this.failure === null && this.socket !== null;
+  }
+
+  request(method: string, body: string, labels?: Partial<RpcErrorLabelSet>): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      if (!this.socket || this.failure) {
+        reject(new RpcError(formatProcessError(method, "", this.failure?.exitCode ?? null, labels), -32000));
+        return;
+      }
+      const pending: PendingRequest = { method, labels, resolve, reject };
+      this.queue.push(pending);
+      const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+      try {
+        this.socket.write(frame);
+        void this.socket.flush();
+      } catch (error) {
+        const index = this.queue.indexOf(pending);
+        if (index >= 0) this.queue.splice(index, 1);
+        reject(new RpcError(formatProcessError(method, "", null, labels), -32000, { cause: error }));
+      }
+    });
+  }
+
+  private drainFrames(): void {
+    while (true) {
+      const frame = extractResponseFrame(this.buffer);
+      if (!frame) return;
+      this.buffer = this.buffer.subarray(frame.consumed);
+      this.queue.shift()?.resolve(frame.body);
+    }
+  }
+
+  private handleExit(exitCode: number | null): void {
+    this.failure = { exitCode };
+    for (const pending of this.queue.splice(0)) {
+      pending.reject(new RpcError(formatProcessError(pending.method, "", exitCode, pending.labels), -32000));
+    }
+    if (connection === this) connection = null;
+  }
+}
+
+async function getConnection(labels?: Partial<RpcErrorLabelSet>): Promise<RpcConnection | SocketRpc> {
   if (connection?.alive) return connection;
+  const socketPath = rpcSocketPath();
+  if (socketPath) {
+    const socket = await SocketRpc.open(socketPath);
+    if (socket) {
+      connection = socket;
+      return socket;
+    }
+  }
   const binary = Bun.env.DITOXD ?? "ditoxd";
   try {
     connection = new RpcConnection(binary);
@@ -213,7 +300,7 @@ function extractResponseFrame(buffer: Buffer): { body: string; consumed: number 
 async function call<T>(method: string, params: Record<string, unknown>, labels?: Partial<RpcErrorLabelSet>): Promise<T> {
   const id = `tui-${nextId++}`;
   const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
-  const raw = await getConnection(labels).request(method, body, labels);
+  const raw = await (await getConnection(labels)).request(method, body, labels);
   const response = JSON.parse(raw) as RpcResponse<T>;
   if ("error" in response) throw new RpcError(formatRpcError(method, response.error.message, labels), response.error.code);
   return response.result;

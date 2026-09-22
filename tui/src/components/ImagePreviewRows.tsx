@@ -154,7 +154,7 @@ function nativeImageRows(props: {
       <NativeTerminalImage
         preview={props.preview}
         sourceKey={nativeImageSourceKey(props.entry, props.preview)}
-        background={props.background ?? "#000000"}
+        background={props.background ?? "transparent"}
         manager={props.imageManager}
         placement={placement}
       />

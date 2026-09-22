@@ -636,6 +636,8 @@ export type CompatThemeFile = {
 export type ResolvedTuiConfig = {
   sourcePath: string | null;
   theme: TuiTheme;
+  /** False when neither the config file nor the environment chose a theme. */
+  themeLocked: boolean;
   terminal: TuiTerminalConfig;
   layout: UiConfig;
   chrome: TuiChromeConfig;
@@ -1204,7 +1206,7 @@ export const defaultLayout: UiConfig = {
   previewWidthPercent: 54,
   maxPreviewLines: 28,
   maxFullPreviewLines: 2000,
-  historyLimit: 100,
+  historyLimit: 1000,
   imagePreviewMode: "blocks",
   fullPreviewImageMode: "blocks",
   imagePreviewMaxWidth: 80,
@@ -1228,9 +1230,9 @@ export const defaultLayout: UiConfig = {
   showHeader: true,
   showStatusLine: true,
   searchOverlayHeight: 3,
-  confirmOverlayHeight: 3,
+  confirmOverlayHeight: 4,
   confirmPinnedExtraRows: 1,
-  clearOverlayHeight: 4,
+  clearOverlayHeight: 5,
   helpOverlayHeight: 12,
   overlayPlacement: "bottom",
   minPaneWidth: 24,
@@ -1354,7 +1356,7 @@ export const defaultLayout: UiConfig = {
   alternateRows: true,
   refreshIntervalMs: 1000,
   mouseEnabled: true,
-  mouseScrollRows: 3,
+  mouseScrollRows: 1,
   showScrollbar: true,
   scrollbarWidth: 1,
   scrollbarPlacement: "right",

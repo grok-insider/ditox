@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
   entryAccent,
   entryMeta,
+  contentRowLayout,
   entryPreview,
   entryPreviewSegments,
+  historyRows,
+  rowTrailing,
   fitRowMeta,
   formatBytes,
   formatClearedStatus,
@@ -14,6 +17,7 @@ import {
   formatFilter,
   formatPinStatus,
   formatViewStatus,
+  plainClipboardPreview,
   previewModel,
   previewMetaTemplateValues,
   previewWindow,
@@ -43,6 +47,39 @@ const entry: Entry = {
 };
 
 describe("presentation", () => {
+  test("shows a markdown clip as one plain row", () => {
+    expect(plainClipboardPreview("# Notes\n\n- one item\n\n```ts\nconst ready = true\n```")).toBe("Notes one item const ready = true");
+  });
+
+  test("puts the copied text ahead of the age and source", () => {
+    const copied = { ...entry, preview: "https://example.com/clip", content: "https://example.com/clip", source_app: "firefox", created_at_ms: Date.now() - 15 * 60 * 1000 };
+    const trailing = rowTrailing(copied, Date.now());
+    const fit = contentRowLayout(40, "TXT", trailing);
+    const preview = entryPreview(copied, fit.previewWidth);
+    const line = `TXT ${preview} ${fit.trailing}`;
+    expect(line.indexOf("https://example.com/clip")).toBeLessThan(line.indexOf(trailing.split(" ")[0] ?? ""));
+    expect(line).toContain("firefox");
+    expect(line).not.toContain(" B");
+  });
+
+  test("shows image dimensions instead of the stored image sentence", () => {
+    expect(entryPreview({ ...entry, kind: "image", mime: "image/png", preview: "Image image/png 2048 bytes", image_width: 1920, image_height: 1080 }, 40)).toBe("1920x1080");
+  });
+
+  test("splits pinned and recent rows without reordering them", () => {
+    const pinned = { ...entry, id: 1, favorite: true };
+    const recent = { ...entry, id: 2, favorite: false };
+    const rows = historyRows([pinned, recent], { pinned: "PINNED" });
+    expect(rows.map((row) => (row.kind === "divider" ? row.title : row.entry.id))).toEqual(["PINNED", 1, "older", 2]);
+    expect(historyRows([pinned], { pinned: "PINNED" }).every((row) => row.kind === "entry")).toBe(true);
+    const now = Date.now();
+    const today = { ...entry, id: 3, favorite: false, created_at_ms: now - 60_000 };
+    const lastWeek = { ...entry, id: 4, favorite: false, created_at_ms: now - 3 * 86_400_000 };
+    const grouped = historyRows([today, lastWeek], { pinned: "PINNED" }, { now, groupByAge: true });
+    expect(grouped.map((row) => (row.kind === "divider" ? row.title : row.entry.id))).toEqual(["today", 3, "week", 4]);
+    expect(historyRows([today, lastWeek], { pinned: "PINNED" }, { now, groupByAge: false }).every((row) => row.kind === "entry")).toBe(true);
+  });
+
   test("formats byte sizes for row metadata", () => {
     expect(formatBytes(42)).toBe("42 B");
     expect(formatBytes(1536)).toBe("1.5 KiB");
@@ -328,6 +365,10 @@ describe("presentation", () => {
     expect(watcherStatusView({ running: true, paused: false, backend: "wl-clipboard", poll_interval_ms: 500, last_seen_ms: 1_000, last_error: null }, labels, 3_000)).toEqual({
       text: "watcher live 2s",
       tone: "success",
+    });
+    expect(watcherStatusView({ running: true, paused: false, backend: "wl-clipboard", poll_interval_ms: 500, last_seen_ms: 1_000, last_error: "compositor unavailable" }, labels, 3_000)).toEqual({
+      text: "watcher live 2s: compositor unavailable",
+      tone: "warning",
     });
     expect(watcherStatusView({ running: false, paused: true, backend: "wl-clipboard", poll_interval_ms: 500, last_seen_ms: 1_000, last_error: null }, labels, 3_000)).toEqual({
       text: "watcher paused",

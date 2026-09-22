@@ -7,6 +7,8 @@ pub const Config = struct {
     db_path: []const u8,
     image_dir: []const u8,
     max_entries: u32 = 1000,
+    max_image_bytes: u32 = 128 * 1024 * 1024,
+    max_text_bytes: u32 = 256 * 1024,
     delete_after_seconds: u32 = 0,
     allow_duplicates: bool = false,
     poll_interval_ms: u32 = 250,
@@ -19,6 +21,7 @@ pub const Config = struct {
     terminal_command: []const u8,
     excluded_apps: []const []const u8 = &.{},
     excluded_windows: []const []const u8 = &.{},
+    secret_patterns: []const []const u8 = &.{},
 
     pub fn load(allocator: std.mem.Allocator, init: std.process.Init) !Config {
         const env = init.environ_map.*;
@@ -39,6 +42,8 @@ pub const Config = struct {
         errdefer freeStringList(allocator, excluded_apps);
         const excluded_windows = try allocator.alloc([]const u8, 0);
         errdefer allocator.free(excluded_windows);
+        const secret_patterns = try defaultSecretPatterns(allocator);
+        errdefer freeStringList(allocator, secret_patterns);
 
         try std.Io.Dir.cwd().createDirPath(init.io, std.fs.path.dirname(config_path) orelse ".");
 
@@ -52,6 +57,7 @@ pub const Config = struct {
             .auto_paste_keybind = auto_paste_keybind,
             .excluded_apps = excluded_apps,
             .excluded_windows = excluded_windows,
+            .secret_patterns = secret_patterns,
         };
 
         if (std.Io.Dir.cwd().readFileAlloc(init.io, config_path, allocator, .limited(1024 * 1024))) |bytes| {
@@ -75,6 +81,7 @@ pub const Config = struct {
         self.allocator.free(self.auto_paste_keybind);
         freeStringList(self.allocator, self.excluded_apps);
         freeStringList(self.allocator, self.excluded_windows);
+        freeStringList(self.allocator, self.secret_patterns);
     }
 
     fn applyConfigFile(self: *Config, bytes: []const u8, home: []const u8, config_home: []const u8, data_home: []const u8) !void {
@@ -97,6 +104,8 @@ pub const Config = struct {
 
     fn applyJsonObject(self: *Config, object: std.json.ObjectMap, home: []const u8, config_home: []const u8, data_home: []const u8) !void {
         if (jsonU32(object, "max_entries") orelse jsonU32(object, "maxHistory")) |value| self.max_entries = value;
+        if (jsonU32(object, "max_image_bytes") orelse jsonU32(object, "maxImageBytes")) |value| self.max_image_bytes = value;
+        if (jsonU32(object, "max_text_bytes") orelse jsonU32(object, "maxTextBytes")) |value| self.max_text_bytes = value;
         if (jsonU32(object, "delete_after_seconds") orelse jsonU32(object, "delete_after") orelse jsonU32(object, "deleteAfter")) |value| {
             self.delete_after_seconds = value;
         }
@@ -128,6 +137,13 @@ pub const Config = struct {
         } else if (try jsonStringArray(self.allocator, object, "excludedWindows")) |value| {
             freeStringList(self.allocator, self.excluded_windows);
             self.excluded_windows = value;
+        }
+        if (try jsonStringArray(self.allocator, object, "secret_patterns")) |value| {
+            freeStringList(self.allocator, self.secret_patterns);
+            self.secret_patterns = value;
+        } else if (try jsonStringArray(self.allocator, object, "secretPatterns")) |value| {
+            freeStringList(self.allocator, self.secret_patterns);
+            self.secret_patterns = value;
         }
 
         if (jsonObject(object, "paste")) |paste| {
@@ -169,6 +185,13 @@ pub const Config = struct {
             } else if (try jsonStringArray(self.allocator, capture, "excludedWindows")) |value| {
                 freeStringList(self.allocator, self.excluded_windows);
                 self.excluded_windows = value;
+            }
+            if (try jsonStringArray(self.allocator, capture, "secret_patterns")) |value| {
+                freeStringList(self.allocator, self.secret_patterns);
+                self.secret_patterns = value;
+            } else if (try jsonStringArray(self.allocator, capture, "secretPatterns")) |value| {
+                freeStringList(self.allocator, self.secret_patterns);
+                self.secret_patterns = value;
             }
         }
     }
@@ -226,6 +249,8 @@ pub const Config = struct {
 
     fn applyHistoryValue(self: *Config, key: []const u8, value: []const u8, home: []const u8, config_home: []const u8, data_home: []const u8) !void {
         if (std.mem.eql(u8, key, "max_entries") or std.mem.eql(u8, key, "maxHistory")) self.max_entries = parseU32(value, self.max_entries);
+        if (std.mem.eql(u8, key, "max_image_bytes") or std.mem.eql(u8, key, "maxImageBytes")) self.max_image_bytes = parseU32(value, self.max_image_bytes);
+        if (std.mem.eql(u8, key, "max_text_bytes") or std.mem.eql(u8, key, "maxTextBytes")) self.max_text_bytes = parseU32(value, self.max_text_bytes);
         if (std.mem.eql(u8, key, "delete_after_seconds") or std.mem.eql(u8, key, "delete_after") or std.mem.eql(u8, key, "deleteAfter")) {
             self.delete_after_seconds = parseU32(value, self.delete_after_seconds);
         }
@@ -241,6 +266,10 @@ pub const Config = struct {
         if (std.mem.eql(u8, key, "excluded_windows") or std.mem.eql(u8, key, "excludedWindows")) {
             freeStringList(self.allocator, self.excluded_windows);
             self.excluded_windows = try parseStringArray(self.allocator, value);
+        }
+        if (std.mem.eql(u8, key, "secret_patterns") or std.mem.eql(u8, key, "secretPatterns")) {
+            freeStringList(self.allocator, self.secret_patterns);
+            self.secret_patterns = try parseStringArray(self.allocator, value);
         }
     }
 
@@ -268,6 +297,7 @@ pub fn testConfig(allocator: std.mem.Allocator, data_dir: []const u8) !Config {
         .auto_paste_keybind = try allocator.dupe(u8, "ctrl+v"),
         .excluded_apps = try allocator.alloc([]const u8, 0),
         .excluded_windows = try allocator.alloc([]const u8, 0),
+        .secret_patterns = try allocator.alloc([]const u8, 0),
     };
 }
 
@@ -327,6 +357,27 @@ fn parseStringArray(allocator: std.mem.Allocator, value: []const u8) ![]const []
     }
     const owned: []const []const u8 = try list.toOwnedSlice(allocator);
     return owned;
+}
+
+fn defaultSecretPatterns(allocator: std.mem.Allocator) ![]const []const u8 {
+    const defaults = [_][]const u8{
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+        "ghp_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxr-",
+        "xoxs-",
+        "AKIA[A-Z0-9]{16}",
+    };
+    var list = try allocator.alloc([]const u8, defaults.len);
+    errdefer allocator.free(list);
+    for (defaults, 0..) |value, index| list[index] = try allocator.dupe(u8, value);
+    return list;
 }
 
 fn defaultExcludedApps(allocator: std.mem.Allocator) ![]const []const u8 {
@@ -441,6 +492,7 @@ test "config TOML parsing covers sections and basic keys" {
         \\[capture]
         \\excluded_apps = ["KeePassXC", "Bitwarden"]
         \\excluded_windows = ["secret window"]
+        \\secret_patterns = ["ghp_", "AKIA[A-Z0-9]{16}"]
     );
     defer cfg.deinit();
 
@@ -457,6 +509,7 @@ test "config TOML parsing covers sections and basic keys" {
     try std.testing.expectEqualStrings("kitty -e ditox tui", cfg.terminal_command);
     try expectStringList(&.{ "KeePassXC", "Bitwarden" }, cfg.excluded_apps);
     try expectStringList(&.{"secret window"}, cfg.excluded_windows);
+    try expectStringList(&.{ "ghp_", "AKIA[A-Z0-9]{16}" }, cfg.secret_patterns);
 }
 
 test "config TOML top-level compatibility aliases" {

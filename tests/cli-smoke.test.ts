@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -281,6 +282,43 @@ describe("ditox CLI smoke", () => {
     expect(runWithStdin(["--wl-store"], "do not store", { CLIPBOARD_STATE: "sensitive" })).toBe("");
     const status = JSON.parse(run(["status"]));
     expect(status.stats.entries).toBe(2);
+  });
+
+  test("daemon ingest drops a sensitive clipboard offer before it reaches the socket", async () => {
+    const runtime = join(tempDir, "run");
+    const sock = join(runtime, "ditox", "rpc.sock");
+    mkdirSync(join(runtime, "ditox"), { recursive: true });
+    let connections = 0;
+    const server = createServer((socket) => {
+      connections += 1;
+      socket.end();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(sock, () => resolve());
+    });
+    const secret = "secret-from-watch";
+    const launch = (state: string, body: string) =>
+      Bun.spawn({
+        cmd: [ditoxd, "ingest", "text"],
+        env: { ...process.env, ...env, XDG_RUNTIME_DIR: runtime, CLIPBOARD_STATE: state },
+        stdin: Buffer.from(body),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    try {
+      const blocked = launch("sensitive", secret);
+      expect(await waitForExit(blocked, 2000)).toBe(0);
+      expect(connections).toBe(0);
+      expect(await new Response(blocked.stdout).text()).not.toContain(secret);
+      expect(await new Response(blocked.stderr).text()).not.toContain(secret);
+
+      const ordinary = launch("data", "ordinary-from-watch");
+      expect(await waitForExit(ordinary, 2000)).toBe(0);
+      expect(connections).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   test("verifies Hyprland paste-back and launch wiring with fake tools", () => {

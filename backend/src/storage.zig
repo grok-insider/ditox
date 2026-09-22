@@ -1,5 +1,6 @@
 const std = @import("std");
 const models = @import("models.zig");
+const policy = @import("policy.zig");
 const util = @import("util.zig");
 const config = @import("config.zig");
 const fuzzy = @import("fuzzy.zig");
@@ -78,21 +79,34 @@ pub const Storage = struct {
     }
 
     pub fn addText(self: *Storage, cfg: config.Config, text: []const u8) !i64 {
-        const content = try util.sanitizeText(self.allocator, text);
-        defer self.allocator.free(content);
+        return self.addTextFrom(cfg, text, null);
+    }
+
+    pub fn addTextFrom(self: *Storage, cfg: config.Config, text: []const u8, source_app: ?[]const u8) !i64 {
+        const sanitized = try util.sanitizeText(self.allocator, text);
+        defer self.allocator.free(sanitized);
+        const content = policy.capUtf8(sanitized, cfg.max_text_bytes);
         const entry_preview = try util.preview(self.allocator, content, cfg.max_preview_chars);
         defer self.allocator.free(entry_preview);
 
         const hash = util.sha256Hex(content);
+        try self.exec("BEGIN IMMEDIATE");
+        var committed = false;
+        errdefer if (!committed) self.exec("ROLLBACK") catch {};
         if (!cfg.allow_duplicates) {
-            if (try self.findIdByHash(&hash)) |existing| return existing;
+            if (try self.findIdByHash(&hash)) |existing| {
+                try self.touchLastUsed(existing, source_app);
+                try self.exec("COMMIT");
+                committed = true;
+                return existing;
+            }
         }
 
         const stmt = try self.prepare(
             \\INSERT INTO entries
-            \\  (kind, mime, content, preview, hash, favorite, created_at_ms, byte_len)
+            \\  (kind, mime, content, preview, hash, favorite, created_at_ms, byte_len, source_app)
             \\VALUES
-            \\  ('text', 'text/plain;charset=utf-8', ?, ?, ?, 0, CAST(strftime('%s','now') AS INTEGER) * 1000, ?)
+            \\  ('text', 'text/plain;charset=utf-8', ?, ?, ?, 0, CAST(strftime('%s','now') AS INTEGER) * 1000, ?, ?)
         );
         defer _ = c.sqlite3_finalize(stmt);
 
@@ -100,16 +114,32 @@ pub const Storage = struct {
         try bindText(stmt, 2, entry_preview);
         try bindText(stmt, 3, &hash);
         try bindInt64(stmt, 4, @intCast(content.len));
+        try bindNullableText(stmt, 5, source_app);
         try self.stepDone(stmt);
 
         _ = try self.applyRetention(cfg);
-        return c.sqlite3_last_insert_rowid(self.db);
+        const id = c.sqlite3_last_insert_rowid(self.db);
+        try self.exec("COMMIT");
+        committed = true;
+        return id;
     }
 
     pub fn addImage(self: *Storage, cfg: config.Config, mime: []const u8, bytes: []const u8, metadata: models.ImageMetadata) !i64 {
+        return self.addImageFrom(cfg, mime, bytes, metadata, null);
+    }
+
+    pub fn addImageFrom(self: *Storage, cfg: config.Config, mime: []const u8, bytes: []const u8, metadata: models.ImageMetadata, source_app: ?[]const u8) !i64 {
         const hash = util.sha256Hex(bytes);
+        try self.exec("BEGIN IMMEDIATE");
+        var committed = false;
+        errdefer if (!committed) self.exec("ROLLBACK") catch {};
         if (!cfg.allow_duplicates) {
-            if (try self.findIdByHash(&hash)) |existing| return existing;
+            if (try self.findIdByHash(&hash)) |existing| {
+                try self.touchLastUsed(existing, source_app);
+                try self.exec("COMMIT");
+                committed = true;
+                return existing;
+            }
         }
 
         const ext = imageExtension(mime);
@@ -126,9 +156,9 @@ pub const Storage = struct {
 
         const stmt = try self.prepare(
             \\INSERT INTO entries
-            \\  (kind, mime, content, preview, hash, favorite, created_at_ms, byte_len, blob_path, image_width, image_height)
+            \\  (kind, mime, content, preview, hash, favorite, created_at_ms, byte_len, blob_path, image_width, image_height, source_app)
             \\VALUES
-            \\  ('image', ?, ?, ?, ?, 0, CAST(strftime('%s','now') AS INTEGER) * 1000, ?, ?, ?, ?)
+            \\  ('image', ?, ?, ?, ?, 0, CAST(strftime('%s','now') AS INTEGER) * 1000, ?, ?, ?, ?, ?)
         );
         defer _ = c.sqlite3_finalize(stmt);
 
@@ -140,10 +170,29 @@ pub const Storage = struct {
         try bindText(stmt, 6, blob_path);
         try bindNullableInt64(stmt, 7, metadata.width);
         try bindNullableInt64(stmt, 8, metadata.height);
+        try bindNullableText(stmt, 9, source_app);
         try self.stepDone(stmt);
 
         _ = try self.applyRetention(cfg);
-        return c.sqlite3_last_insert_rowid(self.db);
+        const id = c.sqlite3_last_insert_rowid(self.db);
+        try self.exec("COMMIT");
+        committed = true;
+        return id;
+    }
+
+    fn touchLastUsed(self: *Storage, id: i64, source_app: ?[]const u8) !void {
+        if (source_app) |app| {
+            const stmt = try self.prepare("UPDATE entries SET last_used_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000, source_app = ? WHERE id = ?");
+            defer _ = c.sqlite3_finalize(stmt);
+            try bindText(stmt, 1, app);
+            try bindInt64(stmt, 2, id);
+            try self.stepDone(stmt);
+            return;
+        }
+        const stmt = try self.prepare("UPDATE entries SET last_used_at_ms = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE id = ?");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindInt64(stmt, 1, id);
+        try self.stepDone(stmt);
     }
 
     pub fn list(self: *Storage, query: []const u8, filter: []const u8, limit: u32) ![]models.Entry {
@@ -384,6 +433,7 @@ pub const Storage = struct {
         var changed: i64 = 0;
         if (cfg.delete_after_seconds > 0) changed += try self.deleteExpired(cfg.delete_after_seconds);
         changed += try self.prune(cfg.max_entries);
+        changed += try self.pruneImagesByBytes(cfg.max_image_bytes);
         if (changed > 0) _ = try self.prunePendingBlobs();
         return changed;
     }
@@ -647,6 +697,45 @@ pub const Storage = struct {
         return c.sqlite3_changes(self.db);
     }
 
+    fn pruneImagesByBytes(self: *Storage, max_bytes: u32) !i64 {
+        if (max_bytes == 0) return 0;
+        const stmt = try self.prepare(
+            \\SELECT id, byte_len FROM entries
+            \\WHERE kind = 'image' AND favorite = 0
+            \\ORDER BY max(created_at_ms, COALESCE(last_used_at_ms, 0)) ASC, id ASC
+        );
+        defer _ = c.sqlite3_finalize(stmt);
+
+        var ids: std.ArrayList(i64) = .empty;
+        defer ids.deinit(self.allocator);
+        var lengths: std.ArrayList(i64) = .empty;
+        defer lengths.deinit(self.allocator);
+        var total: u64 = 0;
+        while (true) {
+            const rc = c.sqlite3_step(stmt);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return self.sqliteError();
+            const len = c.sqlite3_column_int64(stmt, 1);
+            try ids.append(self.allocator, c.sqlite3_column_int64(stmt, 0));
+            try lengths.append(self.allocator, len);
+            if (len > 0) total += @intCast(len);
+        }
+
+        var removed: i64 = 0;
+        for (ids.items, lengths.items) |id, len| {
+            if (total <= max_bytes) break;
+            const drop = try self.prepare("DELETE FROM entries WHERE id = ? AND favorite = 0");
+            defer _ = c.sqlite3_finalize(drop);
+            try bindInt64(drop, 1, id);
+            try self.stepDone(drop);
+            if (c.sqlite3_changes(self.db) == 0) continue;
+            removed += 1;
+            const bytes: u64 = if (len > 0) @intCast(len) else 0;
+            total = if (total > bytes) total - bytes else 0;
+        }
+        return removed;
+    }
+
     fn deleteExpired(self: *Storage, delete_after_seconds: u32) !i64 {
         const cutoff = try self.nowMs() - (@as(i64, delete_after_seconds) * 1000);
         const stmt = try self.prepare(
@@ -887,6 +976,11 @@ pub const Storage = struct {
         return error.SQLiteFailure;
     }
 };
+
+fn bindNullableText(stmt: *c.sqlite3_stmt, index: c_int, value: ?[]const u8) !void {
+    if (value) |actual| return bindText(stmt, index, actual);
+    if (c.sqlite3_bind_null(stmt, index) != c.SQLITE_OK) return error.SQLiteFailure;
+}
 
 fn bindText(stmt: *c.sqlite3_stmt, index: c_int, value: []const u8) !void {
     if (sqlite3_bind_text_opaque(stmt, index, value.ptr, @intCast(value.len), sqlite_transient) != c.SQLITE_OK) {
@@ -1746,4 +1840,140 @@ test "storage markUsed promotes an older entry above newer ones" {
         try std.testing.expectEqual(newer_id, entries[1].id);
         try std.testing.expect(entries[0].last_used_at_ms != null);
     }
+}
+
+test "storage keeps the source app on insert and refreshes it when the same text is copied again" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+
+    var cfg = try config.testConfig(allocator, data_dir);
+    defer cfg.deinit();
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cfg.image_dir);
+
+    var store = try Storage.open(allocator, cfg, std.testing.io);
+    defer store.close();
+
+    const id = try store.addTextFrom(cfg, "copied from firefox", "firefox");
+    {
+        const entry = (try store.get(id)) orelse return error.TestUnexpectedResult;
+        defer entry.deinit(allocator);
+        try std.testing.expectEqualStrings("firefox", entry.source_app.?);
+    }
+
+    const again = try store.addTextFrom(cfg, "copied from firefox", "ghostty");
+    try std.testing.expectEqual(id, again);
+    {
+        const entry = (try store.get(id)) orelse return error.TestUnexpectedResult;
+        defer entry.deinit(allocator);
+        try std.testing.expectEqualStrings("ghostty", entry.source_app.?);
+        try std.testing.expect(entry.last_used_at_ms != null);
+    }
+}
+
+test "image byte budget drops the oldest unpinned image and keeps a pinned one" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+
+    var cfg = try config.testConfig(allocator, data_dir);
+    defer cfg.deinit();
+    cfg.max_image_bytes = 100;
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cfg.image_dir);
+
+    var store = try Storage.open(allocator, cfg, std.testing.io);
+    defer store.close();
+
+    const pinned_id = try store.addImage(cfg, "image/png", "P" ** 80, .{});
+    try std.testing.expect(try store.favorite(pinned_id, true));
+    const old_id = try store.addImage(cfg, "image/png", "A" ** 50, .{});
+    const mid_id = try store.addImage(cfg, "image/png", "B" ** 50, .{});
+    const base = try store.nowMs() - 60_000;
+    inline for (.{ .{ old_id, base }, .{ mid_id, base + 1000 }, .{ pinned_id, base + 2000 } }) |item| {
+        const stmt = try store.prepare("UPDATE entries SET created_at_ms = ? WHERE id = ?");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindInt64(stmt, 1, item[1]);
+        try bindInt64(stmt, 2, item[0]);
+        try store.stepDone(stmt);
+    }
+    const new_id = try store.addImage(cfg, "image/png", "C" ** 50, .{});
+
+    if (try store.get(old_id)) |entry| {
+        entry.deinit(allocator);
+        return error.TestUnexpectedResult;
+    }
+    const pinned = (try store.get(pinned_id)) orelse return error.TestUnexpectedResult;
+    defer pinned.deinit(allocator);
+    try std.testing.expect(pinned.favorite);
+    const mid = (try store.get(mid_id)) orelse return error.TestUnexpectedResult;
+    defer mid.deinit(allocator);
+    const newest = (try store.get(new_id)) orelse return error.TestUnexpectedResult;
+    defer newest.deinit(allocator);
+}
+
+test "a long paste is stored capped and a second copy does not grow it" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+
+    var cfg = try config.testConfig(allocator, data_dir);
+    defer cfg.deinit();
+    cfg.max_text_bytes = 256 * 1024;
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cfg.image_dir);
+
+    var store = try Storage.open(allocator, cfg, std.testing.io);
+    defer store.close();
+
+    const big = try allocator.alloc(u8, 300 * 1024);
+    defer allocator.free(big);
+    @memset(big, 'a');
+
+    const id = try store.addText(cfg, big);
+    const again = try store.addText(cfg, big);
+    try std.testing.expectEqual(id, again);
+    const entry = (try store.get(id)) orelse return error.TestUnexpectedResult;
+    defer entry.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), entry.content.len);
+}
+
+test "search finds an entry that is not among the newest page" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+
+    var cfg = try config.testConfig(allocator, data_dir);
+    defer cfg.deinit();
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cfg.image_dir);
+
+    var store = try Storage.open(allocator, cfg, std.testing.io);
+    defer store.close();
+
+    const old_id = try store.addText(cfg, "ancient needle buried in history");
+    _ = try store.addText(cfg, "fresh unrelated clip");
+    const base = try store.nowMs() - 86_400_000;
+    const stmt = try store.prepare("UPDATE entries SET created_at_ms = ? WHERE id = ?");
+    defer _ = c.sqlite3_finalize(stmt);
+    try bindInt64(stmt, 1, base);
+    try bindInt64(stmt, 2, old_id);
+    try store.stepDone(stmt);
+
+    const matches = try store.list("needle", "all", 1000);
+    defer {
+        for (matches) |entry| entry.deinit(allocator);
+        allocator.free(matches);
+    }
+    try std.testing.expectEqual(@as(usize, 1), matches.len);
+    try std.testing.expectEqual(old_id, matches[0].id);
 }

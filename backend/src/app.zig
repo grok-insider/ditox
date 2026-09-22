@@ -1,8 +1,10 @@
 const std = @import("std");
 const clipboard = @import("clipboard.zig");
 const config = @import("config.zig");
+const policy = @import("policy.zig");
 const storage = @import("storage.zig");
 const models = @import("models.zig");
+const util = @import("util.zig");
 
 pub const Health = struct {
     ok: bool,
@@ -35,6 +37,73 @@ pub const KillWatcherResult = struct {
     killed: bool,
     pid: ?i64,
 };
+
+pub const IngestResult = struct {
+    stored: bool,
+    id: ?i64 = null,
+    reason: []const u8 = "",
+};
+
+pub fn ingestClipboard(
+    allocator: std.mem.Allocator,
+    init: std.process.Init,
+    cfg: config.Config,
+    store: *storage.Storage,
+    kind: []const u8,
+    bytes: []const u8,
+) !IngestResult {
+    const window = try clipboard.activeHyprlandWindow(allocator, init);
+    defer if (window) |active| active.deinit(allocator);
+    const snap: ?policy.WindowSnap = if (window) |active| .{ .class = active.class, .title = active.title } else null;
+
+    if (std.mem.eql(u8, kind, "image")) {
+        const mime = util.detectImageMime(bytes);
+        const hash = util.sha256Hex(bytes);
+        const saved = try store.selfWriteHash();
+        defer if (saved) |value| allocator.free(value);
+        const decision = policy.decideCapture(.{
+            .kind = "image",
+            .bytes = bytes,
+            .image_mime = mime,
+            .window = snap,
+            .content_hash = &hash,
+            .self_hash = saved,
+            .excluded_apps = cfg.excluded_apps,
+            .excluded_windows = cfg.excluded_windows,
+            .secret_patterns = cfg.secret_patterns,
+        });
+        if (saved != null and clearsSelfWrite(decision.reason)) try store.clearSelfWriteHash();
+        if (!decision.store) return .{ .stored = false, .reason = decision.reason };
+        const resolved = mime orelse return .{ .stored = false, .reason = "not-image" };
+        const id = try store.addImageFrom(cfg, resolved, bytes, util.imageMetadata(bytes, resolved), decision.source_app);
+        return .{ .stored = true, .id = id };
+    }
+
+    const content = try util.sanitizeText(allocator, bytes);
+    defer allocator.free(content);
+    const capped = policy.capUtf8(content, cfg.max_text_bytes);
+    const hash = util.sha256Hex(capped);
+    const saved = try store.selfWriteHash();
+    defer if (saved) |value| allocator.free(value);
+    const decision = policy.decideCapture(.{
+        .kind = "text",
+        .bytes = capped,
+        .window = snap,
+        .content_hash = &hash,
+        .self_hash = saved,
+        .excluded_apps = cfg.excluded_apps,
+        .excluded_windows = cfg.excluded_windows,
+        .secret_patterns = cfg.secret_patterns,
+    });
+    if (saved != null and clearsSelfWrite(decision.reason)) try store.clearSelfWriteHash();
+    if (!decision.store) return .{ .stored = false, .reason = decision.reason };
+    const id = try store.addTextFrom(cfg, capped, decision.source_app);
+    return .{ .stored = true, .id = id };
+}
+
+fn clearsSelfWrite(reason: []const u8) bool {
+    return reason.len == 0 or std.mem.eql(u8, reason, "self") or std.mem.eql(u8, reason, "secret");
+}
 
 pub fn configView(cfg: config.Config) ConfigView {
     return .{

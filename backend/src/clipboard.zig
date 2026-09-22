@@ -12,33 +12,84 @@ pub const ActiveWindow = struct {
     }
 };
 
-pub fn listMimeTypes(allocator: std.mem.Allocator, init: std.process.Init) ![][]const u8 {
-    const result = try std.process.run(allocator, init.io, .{
+pub const PasteFailure = enum {
+    empty,
+    type_unavailable,
+    failed,
+};
+
+/// wl-paste exits 1 both when the selection is empty and when the source
+/// advertised a type it will not serve. Those are not watcher failures.
+pub fn classifyPasteFailure(stderr: []const u8) PasteFailure {
+    if (std.mem.indexOf(u8, stderr, "Nothing is copied") != null) return .empty;
+    if (std.mem.indexOf(u8, stderr, "not available as requested type") != null) return .type_unavailable;
+    return .failed;
+}
+
+pub const ClipboardRead = union(enum) {
+    bytes: []u8,
+    empty,
+    type_unavailable,
+    /// Owned detail. Stderr when wl-paste printed some, otherwise the exit reason.
+    failed: []u8,
+
+    pub fn deinit(self: ClipboardRead, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .bytes => |value| allocator.free(value),
+            .failed => |value| allocator.free(value),
+            .empty, .type_unavailable => {},
+        }
+    }
+};
+
+pub const MimeList = union(enum) {
+    types: [][]const u8,
+    empty,
+    failed: []u8,
+
+    pub fn deinit(self: MimeList, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .types => |types| freeMimeTypes(allocator, types),
+            .failed => |value| allocator.free(value),
+            .empty => {},
+        }
+    }
+};
+
+pub fn listMimeTypes(allocator: std.mem.Allocator, init: std.process.Init) !MimeList {
+    const result = std.process.run(allocator, init.io, .{
         .argv = &.{ "wl-paste", "--list-types" },
         .stderr_limit = .limited(4096),
         .stdout_limit = .limited(1024 * 1024),
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    }) catch |err| {
+        return .{ .failed = try allocator.dupe(u8, @errorName(err)) };
+    };
 
-    switch (result.term) {
-        .exited => |code| if (code != 0) return error.ClipboardReadFailed,
-        else => return error.ClipboardReadFailed,
+    const classified = try classifyRun(allocator, result);
+    switch (classified) {
+        .empty => return .empty,
+        .type_unavailable => return .empty,
+        .failed => |detail| return .{ .failed = detail },
+        .bytes => |stdout| {
+            defer allocator.free(stdout);
+            var list: std.ArrayList([]const u8) = .empty;
+            errdefer {
+                for (list.items) |item| allocator.free(item);
+                list.deinit(allocator);
+            }
+            var lines = std.mem.splitScalar(u8, stdout, '\n');
+            while (lines.next()) |line_raw| {
+                const line = std.mem.trim(u8, line_raw, " \t\r\n");
+                if (line.len == 0) continue;
+                try list.append(allocator, try allocator.dupe(u8, line));
+            }
+            if (list.items.len == 0) {
+                list.deinit(allocator);
+                return .empty;
+            }
+            return .{ .types = try list.toOwnedSlice(allocator) };
+        },
     }
-
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (list.items) |item| allocator.free(item);
-        list.deinit(allocator);
-    }
-
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-    while (lines.next()) |line_raw| {
-        const line = std.mem.trim(u8, line_raw, " \t\r\n");
-        if (line.len == 0) continue;
-        try list.append(allocator, try allocator.dupe(u8, line));
-    }
-    return list.toOwnedSlice(allocator);
 }
 
 pub fn freeMimeTypes(allocator: std.mem.Allocator, types: [][]const u8) void {
@@ -60,51 +111,86 @@ pub fn preferredImageMime(types: []const []const u8) ?[]const u8 {
 }
 
 pub fn readText(allocator: std.mem.Allocator, init: std.process.Init) ![]u8 {
-    if (init.environ_map.*.get("DITOX_CLIPBOARD_MOCK")) |path| {
-        return try readMockClipboard(allocator, init, path);
-    }
-
-    const result = try std.process.run(allocator, init.io, .{
-        .argv = &.{ "wl-paste", "--no-newline", "--type", "text" },
-        .stderr_limit = .limited(4096),
-        .stdout_limit = .limited(16 * 1024 * 1024),
-    });
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| if (code != 0) {
-            allocator.free(result.stdout);
-            return error.ClipboardReadFailed;
-        },
-        else => {
-            allocator.free(result.stdout);
+    const read = try readOffer(allocator, init, "text");
+    switch (read) {
+        .bytes => |value| return value,
+        .empty, .type_unavailable => return allocator.dupe(u8, ""),
+        .failed => |detail| {
+            allocator.free(detail);
             return error.ClipboardReadFailed;
         },
     }
-
-    return result.stdout;
 }
 
-pub fn readBytes(allocator: std.mem.Allocator, init: std.process.Init, mime: []const u8) ![]u8 {
-    const result = try std.process.run(allocator, init.io, .{
-        .argv = &.{ "wl-paste", "--type", mime },
-        .stderr_limit = .limited(4096),
-        .stdout_limit = .limited(64 * 1024 * 1024),
-    });
-    defer allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| if (code != 0) {
-            allocator.free(result.stdout);
-            return error.ClipboardReadFailed;
-        },
-        else => {
-            allocator.free(result.stdout);
-            return error.ClipboardReadFailed;
-        },
+/// `mime` null reads the source's preferred offer (`wl-paste --no-newline`)
+/// so a typed read that was refused can still be sniffed. `"text"` keeps the
+/// text shorthand. Any other value is requested with `--type`.
+pub fn readOffer(allocator: std.mem.Allocator, init: std.process.Init, mime: ?[]const u8) !ClipboardRead {
+    if (mime != null and std.mem.eql(u8, mime.?, "text")) {
+        if (init.environ_map.*.get("DITOX_CLIPBOARD_MOCK")) |path| {
+            const bytes = try readMockClipboard(allocator, init, path);
+            if (bytes.len == 0) {
+                allocator.free(bytes);
+                return .empty;
+            }
+            return .{ .bytes = bytes };
+        }
     }
 
-    return result.stdout;
+    var argv_buffer: [4][]const u8 = undefined;
+    const argv = pasteArgv(mime, &argv_buffer);
+    const result = std.process.run(allocator, init.io, .{
+        .argv = argv,
+        .stderr_limit = .limited(4096),
+        .stdout_limit = .limited(if (mime != null and std.mem.eql(u8, mime.?, "text")) 16 * 1024 * 1024 else 64 * 1024 * 1024),
+    }) catch |err| {
+        return .{ .failed = try allocator.dupe(u8, @errorName(err)) };
+    };
+    return classifyRun(allocator, result);
+}
+
+fn pasteArgv(mime: ?[]const u8, buffer: *[4][]const u8) []const []const u8 {
+    if (mime) |value| {
+        if (std.mem.eql(u8, value, "text")) {
+            buffer.* = .{ "wl-paste", "--no-newline", "--type", "text" };
+            return buffer[0..4];
+        }
+        buffer.* = .{ "wl-paste", "--type", value, "" };
+        return buffer[0..3];
+    }
+    buffer.* = .{ "wl-paste", "--no-newline", "", "" };
+    return buffer[0..2];
+}
+
+fn classifyRun(allocator: std.mem.Allocator, result: std.process.RunResult) !ClipboardRead {
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code == 0) {
+            if (result.stdout.len == 0) {
+                allocator.free(result.stdout);
+                return .empty;
+            }
+            return .{ .bytes = result.stdout };
+        },
+        else => {},
+    }
+
+    defer allocator.free(result.stdout);
+    switch (classifyPasteFailure(result.stderr)) {
+        .empty => return .empty,
+        .type_unavailable => return .type_unavailable,
+        .failed => return .{ .failed = try failureDetail(allocator, result.term, result.stderr) },
+    }
+}
+
+fn failureDetail(allocator: std.mem.Allocator, term: std.process.Child.Term, stderr: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, stderr, " \t\r\n");
+    const line = if (std.mem.indexOfAny(u8, trimmed, "\r\n")) |index| trimmed[0..index] else trimmed;
+    if (line.len > 0) return allocator.dupe(u8, line);
+    return switch (term) {
+        .exited => |code| std.fmt.allocPrint(allocator, "exit {d}", .{code}),
+        else => allocator.dupe(u8, "wl-paste did not exit"),
+    };
 }
 
 pub fn writeText(allocator: std.mem.Allocator, init: std.process.Init, text: []const u8) !void {
@@ -319,4 +405,21 @@ fn writeMockClipboard(init: std.process.Init, path: []const u8, text: []const u8
 test "preferredImageMime chooses image types before text" {
     const types = [_][]const u8{ "text/plain", "image/jpeg", "image/png" };
     try std.testing.expectEqualStrings("image/png", preferredImageMime(&types).?);
+}
+
+test "failureDetail keeps the first stderr line and otherwise reports the exit code" {
+    const detail = try failureDetail(std.testing.allocator, .{ .exited = 1 }, "Clipboard exploded\nsecond line\n");
+    defer std.testing.allocator.free(detail);
+    try std.testing.expectEqualStrings("Clipboard exploded", detail);
+
+    const bare = try failureDetail(std.testing.allocator, .{ .exited = 1 }, " \n");
+    defer std.testing.allocator.free(bare);
+    try std.testing.expectEqualStrings("exit 1", bare);
+}
+
+test "classifyPasteFailure separates an empty clipboard from a refused type" {
+    try std.testing.expectEqual(.empty, classifyPasteFailure("Nothing is copied\n"));
+    try std.testing.expectEqual(.type_unavailable, classifyPasteFailure("Clipboard content is not available as requested type \"image/png\"\n"));
+    try std.testing.expectEqual(.failed, classifyPasteFailure("The compositor does not seem to implement zwlr_data_control_manager_v1\n"));
+    try std.testing.expectEqual(.failed, classifyPasteFailure(""));
 }

@@ -15,15 +15,20 @@ pub fn main(init: std.process.Init) !void {
         try watchClipboard(allocator, init);
         return;
     }
+    if (args.len > 1 and std.mem.eql(u8, args[1], "ingest")) {
+        const kind = if (args.len > 2) args[2] else "text";
+        try ingestStdin(allocator, init, kind);
+        return;
+    }
     if (args.len > 1 and (std.mem.eql(u8, args[1], "daemon") or std.mem.eql(u8, args[1], "run"))) {
-        try runPersistentDaemon(allocator, init);
+        try runPersistentDaemon(allocator, init, args[0]);
         return;
     }
 
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = Io.File.stdout().writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-    try stdout.writeAll("usage: ditoxd serve --stdio | ditoxd watch | ditoxd daemon\n  daemon: single long-lived owner running full capture loop (recommended)\n");
+    try stdout.writeAll("usage: ditoxd serve --stdio | ditoxd watch | ditoxd daemon | ditoxd ingest <text|image>\n");
     try stdout.flush();
 }
 
@@ -105,32 +110,151 @@ fn watchClipboard(allocator: std.mem.Allocator, init: std.process.Init) !void {
     try runCaptureLoop(allocator, init, opened.cfg, &opened.store);
 }
 
-fn captureImageFirst(
+const OfferClass = enum { bytes, empty, unavailable, failed };
+
+/// What a capture tick does with one clipboard read.
+const CaptureDecision = enum {
+    /// Bytes are a usable image, or text worth storing.
+    store,
+    /// Typed image read did not serve bytes. One untyped read follows.
+    try_untyped,
+    /// Nothing to store and nothing to report. Do not read text.
+    skip,
+    /// Real wl-paste or compositor failure.
+    fail,
+    /// No image was announced. The text offer may be read.
+    read_text,
+};
+
+fn offerClass(read: *const core.clipboard.ClipboardRead) OfferClass {
+    return switch (read.*) {
+        .bytes => .bytes,
+        .empty => .empty,
+        .type_unavailable => .unavailable,
+        .failed => .failed,
+    };
+}
+
+fn afterAnnouncedImage(class: OfferClass) CaptureDecision {
+    return switch (class) {
+        .bytes => .store,
+        .empty, .unavailable => .try_untyped,
+        .failed => .fail,
+    };
+}
+
+/// Typed bytes are stored only when they are a real image. A sniffable
+/// announcement that does not match the payload gets one untyped retry
+/// instead of being saved as text.
+fn afterTypedImageBytes(usable_image: bool) CaptureDecision {
+    return if (usable_image) .store else .try_untyped;
+}
+
+fn afterUntypedFallback(class: OfferClass, sniffed_image: bool) CaptureDecision {
+    return switch (class) {
+        .bytes => if (sniffed_image) .store else .skip,
+        .empty, .unavailable => .skip,
+        .failed => .fail,
+    };
+}
+
+fn afterTextOffer(class: OfferClass) CaptureDecision {
+    return switch (class) {
+        .bytes => .store,
+        .empty, .unavailable => .skip,
+        .failed => .fail,
+    };
+}
+
+const CaptureStep = union(enum) {
+    done,
+    read_text,
+    failed: []u8,
+};
+
+fn captureImage(
     allocator: std.mem.Allocator,
     init: std.process.Init,
     cfg: core.config.Config,
     store: *core.storage.Storage,
     last_hash: *?[64]u8,
-) !bool {
-    const types = core.clipboard.listMimeTypes(allocator, init) catch return false;
-    defer core.clipboard.freeMimeTypes(allocator, types);
-    const announced = core.clipboard.preferredImageMime(types) orelse return false;
-    const bytes = core.clipboard.readBytes(allocator, init, announced) catch return false;
-    defer allocator.free(bytes);
-    if (bytes.len == 0) return false;
+) !CaptureStep {
+    const listed = try core.clipboard.listMimeTypes(allocator, init);
+    switch (listed) {
+        .empty => return .done,
+        .failed => |reason| return .{ .failed = reason },
+        .types => |types| {
+            defer core.clipboard.freeMimeTypes(allocator, types);
+            const announced = core.clipboard.preferredImageMime(types) orelse return .read_text;
+            const typed = try core.clipboard.readOffer(allocator, init, announced);
+            switch (afterAnnouncedImage(offerClass(&typed))) {
+                .fail => {
+                    const reason = typed.failed;
+                    return .{ .failed = reason };
+                },
+                .store => {
+                    const bytes = typed.bytes;
+                    defer allocator.free(bytes);
+                    const usable = bytes.len > 0 and (core.util.detectImageMime(bytes) != null or !core.util.isSniffableImageMime(announced));
+                    if (afterTypedImageBytes(usable) == .store) {
+                        if (try storeImageOffer(allocator, cfg, store, last_hash, announced, bytes)) return .done;
+                    }
+                },
+                .try_untyped => typed.deinit(allocator),
+                .skip, .read_text => typed.deinit(allocator),
+            }
 
-    // The clipboard can change between listing MIME types and reading bytes,
-    // and offers can simply mislabel their payload. Trust the magic bytes over
-    // the announced type: a recognized signature corrects the stored MIME, and
-    // bytes that fail to match a sniffable announced type are not stored as an
-    // image at all (the text path picks the tick up instead). Unverifiable
-    // formats (e.g. image/svg+xml) keep the announced type as before.
+            const untyped = try core.clipboard.readOffer(allocator, init, null);
+            const sniffed = switch (untyped) {
+                .bytes => |bytes| core.util.detectImageMime(bytes) != null,
+                else => false,
+            };
+            switch (afterUntypedFallback(offerClass(&untyped), sniffed)) {
+                .store => {
+                    const bytes = untyped.bytes;
+                    defer allocator.free(bytes);
+                    const mime = core.util.detectImageMime(bytes).?;
+                    _ = try storeResolvedImage(allocator, cfg, store, last_hash, mime, bytes);
+                    return .done;
+                },
+                .fail => return .{ .failed = untyped.failed },
+                .skip, .try_untyped, .read_text => {
+                    untyped.deinit(allocator);
+                    return .done;
+                },
+            }
+        },
+    }
+}
+
+fn storeImageOffer(
+    allocator: std.mem.Allocator,
+    cfg: core.config.Config,
+    store: *core.storage.Storage,
+    last_hash: *?[64]u8,
+    announced: []const u8,
+    bytes: []const u8,
+) !bool {
+    if (bytes.len == 0) return false;
+    // Trust magic bytes over the announced type. A sniffable announcement
+    // that does not match is not stored. Formats without a signature, such
+    // as image/svg+xml, keep the announced type.
     const sniffed = core.util.detectImageMime(bytes);
     const mime = sniffed orelse mime: {
         if (core.util.isSniffableImageMime(announced)) return false;
         break :mime announced;
     };
+    return try storeResolvedImage(allocator, cfg, store, last_hash, mime, bytes);
+}
 
+fn storeResolvedImage(
+    allocator: std.mem.Allocator,
+    cfg: core.config.Config,
+    store: *core.storage.Storage,
+    last_hash: *?[64]u8,
+    mime: []const u8,
+    bytes: []const u8,
+) !bool {
     const hash = core.util.sha256Hex(bytes);
     if (last_hash.* != null and std.mem.eql(u8, &last_hash.*.?, &hash)) return true;
     if (try shouldSkipSelfWrite(allocator, store, &hash)) {
@@ -148,26 +272,46 @@ fn captureText(
     cfg: core.config.Config,
     store: *core.storage.Storage,
     last_hash: *?[64]u8,
-) !void {
-    const text = try core.clipboard.readText(allocator, init);
-    defer allocator.free(text);
-    if (text.len == 0) return;
-    const hash = core.util.sha256Hex(text);
-    if (last_hash.* != null and std.mem.eql(u8, &last_hash.*.?, &hash)) return;
-    if (try shouldSkipSelfWrite(allocator, store, &hash)) {
-        last_hash.* = hash;
-        return;
+) !CaptureStep {
+    const read = try core.clipboard.readOffer(allocator, init, "text");
+    switch (afterTextOffer(offerClass(&read))) {
+        .store => {
+            const text = read.bytes;
+            defer allocator.free(text);
+            if (text.len == 0) return .done;
+            const hash = core.util.sha256Hex(text);
+            if (last_hash.* != null and std.mem.eql(u8, &last_hash.*.?, &hash)) return .done;
+            if (try shouldSkipSelfWrite(allocator, store, &hash)) {
+                last_hash.* = hash;
+                return .done;
+            }
+            _ = try store.addText(cfg, text);
+            last_hash.* = hash;
+            return .done;
+        },
+        .fail => return .{ .failed = read.failed },
+        .skip, .try_untyped, .read_text => {
+            read.deinit(allocator);
+            return .done;
+        },
     }
-    _ = try store.addText(cfg, text);
-    last_hash.* = hash;
+}
+
+const SelfWriteDecision = enum { store, skip };
+
+fn decideSelfWrite(stored: ?[]const u8, seen: []const u8) SelfWriteDecision {
+    const previous = stored orelse return .store;
+    if (std.mem.eql(u8, previous, seen)) return .skip;
+    return .store;
 }
 
 fn shouldSkipSelfWrite(allocator: std.mem.Allocator, store: *core.storage.Storage, hash: []const u8) !bool {
     const self_hash = try store.selfWriteHash() orelse return false;
     defer allocator.free(self_hash);
-    if (!std.mem.eql(u8, self_hash, hash)) return false;
+    // A different clipboard value retires the saved hash. Leaving it set made
+    // a later intentional copy of that same text look like our own paste.
     try store.clearSelfWriteHash();
-    return true;
+    return decideSelfWrite(self_hash, hash) == .skip;
 }
 
 fn isActiveWindowExcluded(allocator: std.mem.Allocator, init: std.process.Init, cfg: core.config.Config) !bool {
@@ -219,6 +363,12 @@ test "framedRequestSpan parses complete Content-Length frames only" {
     try std.testing.expectEqual(@as(usize, 2), bare.body_len);
 }
 
+test "a different clipboard value retires a stale self-write hash" {
+    try std.testing.expectEqual(.store, decideSelfWrite(null, "abc"));
+    try std.testing.expectEqual(.skip, decideSelfWrite("abc", "abc"));
+    try std.testing.expectEqual(.store, decideSelfWrite("abc", "def"));
+}
+
 test "excluded app and window matching is case-insensitive" {
     const apps = [_][]const u8{ "Bitwarden", "KeePassXC" };
     const windows = [_][]const u8{"Secret Window"};
@@ -235,29 +385,181 @@ test "excluded app and window matching is case-insensitive" {
 /// - Runs the FULL clipboard capture watcher loop (captureImageFirst + captureText + add* writes + exclude/pause/last_hash/self-write guards) against that single owned *Storage.
 /// - `ditoxd serve --stdio` and legacy `ditoxd watch` remain for compatibility / one-offs.
 /// - This eliminates the N-process writer contention at the source for the capture workload.
-fn runPersistentDaemon(allocator: std.mem.Allocator, init: std.process.Init) !void {
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = Io.File.stdout().writer(init.io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
+const Client = struct {
+    fd: std.posix.fd_t,
+    pending: std.ArrayList(u8),
+};
 
-    try stdout.writeAll("Starting proper persistent ditoxd daemon (single DB owner + full capture)...\n");
-    try stdout.flush();
-
+fn runPersistentDaemon(allocator: std.mem.Allocator, init: std.process.Init, exe: []const u8) !void {
     var opened = try core.app.openStore(allocator, init);
-    // Intentionally do not defer deinit/close here: the daemon *owns* these for its entire lifetime.
-    // On process exit the OS reclaims; this is the single-owner model.
-
     try opened.store.markWatcherPid(@as(i64, @intCast(std.os.linux.getpid())));
-    // Best-effort clear on any return path (normal for long-lived daemon is process death).
     defer opened.store.clearWatcherPid() catch {};
+    opened.store.clearWatcherError() catch {};
 
-    try stdout.writeAll("Daemon owns the single long-lived DB connection. Entering owned capture loop.\n");
-    try stdout.flush();
+    const socket_path = try rpcSocketPath(allocator, init);
+    defer allocator.free(socket_path);
+    var server = try listenRpc(allocator, init, socket_path);
+    defer server.deinit(init.io);
 
-    // Run the *real* capture workload (image/text polling, dedup, exclusions, addText/addImage writes,
-    // markWatcherSeen, retention) directly against the owned store. No other process does the heavy writes.
-    // This is the structural fix the verifiers required.
-    try runCaptureLoop(allocator, init, opened.cfg, &opened.store);
+    var watches = try spawnWatches(allocator, init, exe);
+    defer {
+        for (&watches) |*watch| watch.kill(init.io);
+    }
+
+    var clients: std.ArrayList(Client) = .empty;
+    defer {
+        for (clients.items) |*client| {
+            _ = std.posix.system.close(client.fd);
+            client.pending.deinit(allocator);
+        }
+        clients.deinit(allocator);
+    }
+
+    while (true) {
+        var polls: [9]std.posix.pollfd = undefined;
+        polls[0] = .{ .fd = server.socket.handle, .events = std.posix.POLL.IN, .revents = 0 };
+        const n_clients = @min(clients.items.len, polls.len - 1);
+        for (clients.items[0..n_clients], 0..) |client, index| {
+            polls[index + 1] = .{ .fd = client.fd, .events = std.posix.POLL.IN, .revents = 0 };
+        }
+        const ready = std.posix.poll(polls[0 .. n_clients + 1], 1000) catch 0;
+        opened.store.markWatcherSeen() catch {};
+        restartWatches(init, exe, &watches);
+        if (ready == 0) continue;
+        if (polls[0].revents & std.posix.POLL.IN != 0) {
+            if (server.accept(init.io)) |stream| {
+                try clients.append(allocator, .{ .fd = stream.socket.handle, .pending = .empty });
+            } else |_| {}
+        }
+        var index: usize = 0;
+        while (index < clients.items.len) {
+            const poll_index = index + 1;
+            if (poll_index >= polls.len or polls[poll_index].revents & std.posix.POLL.IN == 0) {
+                index += 1;
+                continue;
+            }
+            if (readClient(allocator, init, &opened, &clients.items[index])) {
+                index += 1;
+            } else {
+                _ = std.posix.system.close(clients.items[index].fd);
+                clients.items[index].pending.deinit(allocator);
+                _ = clients.swapRemove(index);
+            }
+        }
+    }
+}
+
+fn readClient(allocator: std.mem.Allocator, init: std.process.Init, opened: anytype, client: *Client) bool {
+    var buf: [8192]u8 = undefined;
+    const n = std.posix.read(client.fd, &buf) catch return false;
+    if (n == 0) return false;
+    client.pending.appendSlice(allocator, buf[0..n]) catch return false;
+    while (framedRequestSpan(client.pending.items)) |span| {
+        const request = client.pending.items[span.body_start..][0..span.body_len];
+        const response = core.rpc.handleOpened(allocator, init, request, opened) catch return false;
+        defer allocator.free(response);
+        const framed = core.rpc.frame(allocator, response) catch return false;
+        defer allocator.free(framed);
+        writeAllFd(client.fd, framed) catch return false;
+        client.pending.replaceRange(allocator, 0, span.body_start + span.body_len, &.{}) catch return false;
+    }
+    return true;
+}
+
+fn writeAllFd(fd: std.posix.fd_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const rc = std.posix.system.write(fd, bytes.ptr + offset, bytes.len - offset);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) return error.WriteFailed;
+                offset += n;
+            },
+            .INTR => continue,
+            else => return error.WriteFailed,
+        }
+    }
+}
+
+fn rpcSocketPath(allocator: std.mem.Allocator, init: std.process.Init) ![]u8 {
+    const runtime = init.environ_map.*.get("XDG_RUNTIME_DIR") orelse "/tmp";
+    return std.fmt.allocPrint(allocator, "{s}/ditox/rpc.sock", .{runtime});
+}
+
+fn listenRpc(allocator: std.mem.Allocator, init: std.process.Init, path: []const u8) !std.Io.net.Server {
+    if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| {
+        const dir_z = try allocator.dupeZ(u8, path[0..slash]);
+        defer allocator.free(dir_z);
+        switch (std.posix.errno(std.posix.system.mkdir(dir_z, 0o700))) {
+            .SUCCESS, .EXIST => {},
+            else => return error.Unexpected,
+        }
+    }
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    _ = std.posix.system.unlink(path_z);
+    const address = try std.Io.net.UnixAddress.init(path);
+    return address.listen(init.io, .{});
+}
+
+fn spawnWatches(allocator: std.mem.Allocator, init: std.process.Init, exe: []const u8) ![3]std.process.Child {
+    return .{
+        try spawnWatch(allocator, init, exe, &.{ "wl-paste", "--watch", "--no-newline", "--type", "text", "--", exe, "ingest", "text" }),
+        try spawnWatch(allocator, init, exe, &.{ "wl-paste", "--watch", "--type", "image/png", "--", exe, "ingest", "image" }),
+        try spawnWatch(allocator, init, exe, &.{ "wl-paste", "--watch", "--type", "image/jpeg", "--", exe, "ingest", "image" }),
+    };
+}
+
+fn spawnWatch(allocator: std.mem.Allocator, init: std.process.Init, exe: []const u8, argv: []const []const u8) !std.process.Child {
+    _ = allocator;
+    _ = exe;
+    return std.process.spawn(init.io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+}
+
+fn restartWatches(init: std.process.Init, exe: []const u8, watches: *[3]std.process.Child) void {
+    const specs = [_][]const []const u8{
+        &.{ "wl-paste", "--watch", "--no-newline", "--type", "text", "--", exe, "ingest", "text" },
+        &.{ "wl-paste", "--watch", "--type", "image/png", "--", exe, "ingest", "image" },
+        &.{ "wl-paste", "--watch", "--type", "image/jpeg", "--", exe, "ingest", "image" },
+    };
+    for (watches, specs) |*watch, argv| {
+        const pid = watch.id orelse continue;
+        var status: c_int = 0;
+        const waited = std.posix.system.waitpid(pid, &status, 1);
+        if (waited == 0) continue;
+        watch.id = null;
+        watch.* = spawnWatch(init.gpa, init, exe, argv) catch continue;
+    }
+}
+
+fn ingestStdin(allocator: std.mem.Allocator, init: std.process.Init, kind: []const u8) !void {
+    if (core.policy.offerIsSensitive(init.environ_map.*.get("CLIPBOARD_STATE"))) return;
+    const bytes = try core.util.readAllStdin(allocator);
+    defer allocator.free(bytes);
+    if (bytes.len == 0) return;
+    const encoded_len = std.base64.standard.Encoder.calcSize(bytes.len);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, bytes);
+    const body = try std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"clipboard.ingest\",\"params\":{{\"kind\":\"{s}\",\"data\":\"{s}\"}}}}", .{ kind, encoded });
+    defer allocator.free(body);
+    const framed = try core.rpc.frame(allocator, body);
+    defer allocator.free(framed);
+
+    const socket_path = try rpcSocketPath(allocator, init);
+    defer allocator.free(socket_path);
+    const address = std.Io.net.UnixAddress.init(socket_path) catch return;
+    const stream = address.connect(init.io) catch return;
+    defer stream.close(init.io);
+    try writeAllFd(stream.socket.handle, framed);
+    var buf: [1024]u8 = undefined;
+    _ = std.posix.read(stream.socket.handle, &buf) catch {};
 }
 
 /// Shared capture loop used by both legacy `watch` and the new single-owner `daemon`.
@@ -290,19 +592,36 @@ fn runCaptureLoop(
         }
 
         var tick_error = false;
-        const image_handled = captureImageFirst(allocator, init, cfg, store, &last_hash) catch |err| handled: {
+        // An announced image that cannot be read is retried next poll. It is
+        // not stored as the text alternative, and it is not a watcher error.
+        // Only a real wl-paste or storage failure is recorded.
+        if (captureImage(allocator, init, cfg, store, &last_hash)) |image_step| {
+            switch (image_step) {
+                .done => {},
+                .read_text => {
+                    if (captureText(allocator, init, cfg, store, &last_hash)) |text_step| {
+                        switch (text_step) {
+                            .done, .read_text => {},
+                            .failed => |reason| {
+                                defer allocator.free(reason);
+                                tick_error = true;
+                                reportCaptureError(allocator, store, "text capture", reason);
+                            },
+                        }
+                    } else |err| {
+                        tick_error = true;
+                        reportCaptureError(allocator, store, "text capture", @errorName(err));
+                    }
+                },
+                .failed => |reason| {
+                    defer allocator.free(reason);
+                    tick_error = true;
+                    reportCaptureError(allocator, store, "image capture", reason);
+                },
+            }
+        } else |err| {
             tick_error = true;
-            reportCaptureError(allocator, store, "image capture", err);
-            // An image was on the clipboard but storing it failed. Treat the
-            // tick as handled so the text alternative (often just a URL) does
-            // not replace the image; the next poll retries the image.
-            break :handled true;
-        };
-        if (!image_handled) {
-            captureText(allocator, init, cfg, store, &last_hash) catch |err| {
-                tick_error = true;
-                reportCaptureError(allocator, store, "text capture", err);
-            };
+            reportCaptureError(allocator, store, "image capture", @errorName(err));
         }
         if (had_error and !tick_error) store.clearWatcherError() catch {};
         had_error = tick_error;
@@ -311,9 +630,28 @@ fn runCaptureLoop(
     }
 }
 
-fn reportCaptureError(allocator: std.mem.Allocator, store: *core.storage.Storage, context: []const u8, err: anyerror) void {
-    std.log.warn("{s} failed: {s}", .{ context, @errorName(err) });
-    const message = std.fmt.allocPrint(allocator, "{s} failed: {s}", .{ context, @errorName(err) }) catch return;
+fn reportCaptureError(allocator: std.mem.Allocator, store: *core.storage.Storage, context: []const u8, reason: []const u8) void {
+    std.log.warn("{s} failed: {s}", .{ context, reason });
+    const message = std.fmt.allocPrint(allocator, "{s} failed: {s}", .{ context, reason }) catch return;
     defer allocator.free(message);
     store.setWatcherError(message) catch {};
+}
+
+test "an announced image that cannot be read does not fall through to text" {
+    try std.testing.expectEqual(.try_untyped, afterAnnouncedImage(.unavailable));
+    try std.testing.expectEqual(.try_untyped, afterAnnouncedImage(.empty));
+    try std.testing.expectEqual(.try_untyped, afterTypedImageBytes(false));
+    try std.testing.expectEqual(.skip, afterUntypedFallback(.unavailable, false));
+    try std.testing.expectEqual(.skip, afterUntypedFallback(.empty, false));
+    try std.testing.expectEqual(.skip, afterUntypedFallback(.bytes, false));
+    try std.testing.expectEqual(.store, afterUntypedFallback(.bytes, true));
+    try std.testing.expectEqual(.fail, afterAnnouncedImage(.failed));
+    try std.testing.expectEqual(.store, afterTypedImageBytes(true));
+}
+
+test "an empty clipboard and a refused text type are not watcher failures" {
+    try std.testing.expectEqual(.skip, afterTextOffer(.empty));
+    try std.testing.expectEqual(.skip, afterTextOffer(.unavailable));
+    try std.testing.expectEqual(.fail, afterTextOffer(.failed));
+    try std.testing.expectEqual(.store, afterTextOffer(.bytes));
 }

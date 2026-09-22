@@ -286,9 +286,7 @@ fn checkedDurationMs(number_raw: []const u8, multiplier: u64) !u32 {
 }
 
 fn storeWlData(allocator: std.mem.Allocator, init: std.process.Init, cfg: core.config.Config, store: anytype) !void {
-    if (init.environ_map.*.get("CLIPBOARD_STATE")) |state| {
-        if (std.mem.eql(u8, state, "sensitive")) return;
-    }
+    if (core.policy.offerIsSensitive(init.environ_map.*.get("CLIPBOARD_STATE"))) return;
 
     const input = try core.util.readAllStdin(allocator);
     defer allocator.free(input);

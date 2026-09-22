@@ -151,8 +151,24 @@ fn dispatch(allocator: std.mem.Allocator, init: std.process.Init, id_value: std.
     if (std.mem.eql(u8, method, "stats.get")) {
         return successResponseOwned(allocator, id_value, try opened.store.stats());
     }
+    if (std.mem.eql(u8, method, "clipboard.ingest")) {
+        const kind = getString(params, "kind") orelse "text";
+        const encoded = getString(params, "data") orelse return errorResponseOwned(allocator, id_value, -32602, "missing data");
+        const decoded = try decodeBase64(allocator, encoded);
+        defer allocator.free(decoded);
+        const result = try app.ingestClipboard(allocator, init, opened.cfg, &opened.store, kind, decoded);
+        return successResponseOwned(allocator, id_value, result);
+    }
 
     return errorResponseOwned(allocator, id_value, -32601, "method not found");
+}
+
+fn decodeBase64(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
+    const size = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return error.InvalidBase64;
+    const out = try allocator.alloc(u8, size);
+    errdefer allocator.free(out);
+    std.base64.standard.Decoder.decode(out, encoded) catch return error.InvalidBase64;
+    return out;
 }
 
 pub fn frame(allocator: std.mem.Allocator, json_body: []const u8) ![]u8 {
@@ -257,6 +273,7 @@ fn validateParams(method: []const u8, params: ?std.json.Value) ?[]const u8 {
     if (std.mem.eql(u8, method, "entries.paste")) return validatePasteParams(params);
     if (std.mem.eql(u8, method, "entries.favorite")) return validateFavoriteParams(params);
     if (std.mem.eql(u8, method, "entries.clear")) return validateClearParams(params);
+    if (std.mem.eql(u8, method, "clipboard.ingest")) return validateOptionalKeys(params, &.{ "kind", "data" });
     if (std.mem.eql(u8, method, "history.pause")) return validatePauseParams(params);
     return null;
 }
@@ -276,7 +293,7 @@ fn validateListParams(params: ?std.json.Value) ?[]const u8 {
         if (value != .string or !validFilter(value.string)) return "invalid filter";
     }
     if (object.get("limit")) |value| {
-        if (value != .integer or value.integer < 1 or value.integer > 500) return "invalid limit";
+        if (value != .integer or value.integer < 1 or value.integer > 1000) return "invalid limit";
     }
     return null;
 }
@@ -388,7 +405,8 @@ test "validateParams enforces method-specific RPC params" {
     try expectValidParams("entries.paste", "{\"id\":1,\"target_window\":\"0xabc\"}");
     try expectValidParams("entries.get_image", "{\"id\":7}");
     try expectInvalidParams("entries.get_image", "{}");
-    try expectValidParams("entries.list", "{\"query\":\"needle\",\"filter\":\"today\",\"limit\":500}");
+    try expectValidParams("entries.list", "{\"query\":\"needle\",\"filter\":\"today\",\"limit\":1000}");
+    try expectInvalidParams("entries.list", "{\"limit\":1001}");
     try expectValidParams("history.pause", "{}");
     try expectValidParams("stats.get", "{}");
     try expectInvalidParams("entries.favorite", "{\"id\":1}");

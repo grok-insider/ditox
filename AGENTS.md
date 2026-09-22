@@ -169,8 +169,10 @@ Tests isolate via `XDG_DATA_HOME` / `XDG_CONFIG_HOME` temp dirs.
   for direct/unit use — production installs the RPC source in `App.run`. Do
   not add direct filesystem reads to the TUI.
 - **Image-over-text capture priority**: the watcher prefers image formats so
-  "copy image" from a browser stores the image, not the URL. A failed image
-  store is retried next poll instead of falling back to the text alternative.
+  "copy image" from a browser stores the image, not the URL. An announced
+  image that cannot be read is retried next poll and is not replaced by the
+  text alternative. An empty clipboard, or an offer that does not serve its
+  announced type, is not a watcher error.
 - **MIME is verified, not trusted**: capture paths sniff magic bytes via
   `util.detectImageMime`; a sniffable announced type that does not match the
   bytes is not stored as an image.

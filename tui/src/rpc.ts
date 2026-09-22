@@ -62,8 +62,13 @@ export async function outputEntries(ids: number[], labels?: Partial<RpcErrorLabe
   return call<{ content: string }>("entries.output", { ids }, labels);
 }
 
-export async function pasteEntry(id: number, targetWindow?: string, labels?: Partial<RpcErrorLabelSet>): Promise<{ pasted: boolean }> {
-  return call<{ pasted: boolean }>("entries.paste", { id, target_window: targetWindow }, labels);
+export async function pasteEntry(
+  id: number,
+  targetWindow?: string,
+  labels?: Partial<RpcErrorLabelSet>,
+  mode: "original" | "plain" = "original",
+): Promise<{ pasted: boolean; reason?: string }> {
+  return call<{ pasted: boolean; reason?: string }>("entries.paste", { id, target_window: targetWindow, mode }, labels);
 }
 
 export type ImageBytesResponse = {

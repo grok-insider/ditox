@@ -28,6 +28,7 @@ export type DitoxKeymapActions = {
   setState: (updater: UiState | ((previous: UiState) => UiState)) => void;
   refresh: (next?: Partial<UiState>) => Promise<void>;
   copySelected: (paste: boolean) => Promise<void>;
+  pastePlainSelected: () => Promise<void>;
   bulkCopySelected: () => Promise<void>;
   copySearchMatches: () => Promise<void>;
   outputSelected: () => Promise<void>;
@@ -113,6 +114,7 @@ export function useDitoxKeymap(actions: DitoxKeymapActions) {
           ...bind(keys.previewPageUp, () => actions.setState((previous) => movePreview(previous, -previewVisibleRows(actions), totalLines(), previewVisibleRows(actions)))),
           ...bind(keys.previewPageDown, () => actions.setState((previous) => movePreview(previous, previewVisibleRows(actions), totalLines(), previewVisibleRows(actions)))),
           ...bind(keys.copyPaste, () => actions.copySelected(true)),
+          ...bind(keys.pastePlain, () => actions.pastePlainSelected()),
           ...bind(keys.copyOnly, () => actions.copySelected(false)),
           ...bind(keys.forceQuit, () => shutdownTui(renderer)),
         ],
@@ -162,7 +164,7 @@ export function useDitoxKeymap(actions: DitoxKeymapActions) {
         ...bind(keys.togglePinnedView, () => actions.togglePinnedView()),
         ...bind(keys.preview, () => actions.setState((previous) => ({ ...previous, mode: "preview", previewOffset: 0 }))),
         ...bind(keys.delete, () => actions.setState((previous) => ({ ...previous, mode: "confirm-delete" }))),
-        ...bind(keys.copyPaste, () => actions.copySelected(true)),
+        ...browsePasteCommands(actions),
         ...bind(keys.copyOnly, () => actions.copySelected(false)),
         ...bind(keys.bulkCopy, () => actions.bulkCopySelected()),
         ...bind(keys.output, () => actions.outputSelected()),
@@ -186,6 +188,14 @@ export function browseTypeQuery(sequence: string | undefined, bindings: Resolved
     }
   }
   return sequence;
+}
+
+export function browsePasteCommands(actions: Pick<DitoxKeymapActions, "copySelected" | "pastePlainSelected" | "config">): Array<{ key: string; cmd: () => void | Promise<void> }> {
+  const keys = actions.config.keyBindings;
+  return [
+    ...bind(keys.copyPaste, () => actions.copySelected(true)),
+    ...bind(keys.pastePlain, () => actions.pastePlainSelected()),
+  ];
 }
 
 function bind(keys: string[], cmd: () => void | Promise<void>): Array<{ key: string; cmd: () => void | Promise<void> }> {

@@ -35,6 +35,7 @@ export function helpRows(config: ResolvedTuiConfig): Array<{ keys: string; actio
     previewBack: { keys: keyDisplay(keys.previewBack, labels, keyLabels), action: labels.helpPreviewBack },
     pinnedView: { keys: keyDisplay(keys.togglePinnedView, labels, keyLabels), action: labels.helpPinnedView },
     paste: { keys: keyDisplay(keys.copyPaste, labels, keyLabels), action: labels.helpPaste },
+    pastePlain: { keys: keyDisplay(keys.pastePlain, labels, keyLabels), action: labels.helpPastePlain },
     copySet: { keys: keyGroup(labels, keyLabels, keys.copyOnly, keys.bulkCopy), action: labels.helpCopySet },
     output: { keys: keyDisplay(keys.output, labels, keyLabels), action: labels.helpOutput },
     markSingle: { keys: keyGroup(labels, keyLabels, keys.selectToggle, keys.selectSingle, keys.clearSelection), action: labels.helpMarkSingle },

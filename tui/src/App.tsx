@@ -161,6 +161,23 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     }
   }
 
+  async function pastePlainSelected() {
+    const entry = selectedEntry(state());
+    if (!entry) return;
+    try {
+      const result = await pastePlainEntry(entry.id, Bun.env.DITOX_TARGET_WINDOW, config().labels);
+      const status = result.pasted ? config().labels.statusPasted : config().labels.statusNothingCopied;
+      if (result.pasted && config().behavior.exitAfterPaste) {
+        setState((previous) => ({ ...previous, status }));
+        exitAfter(true, renderer);
+        return;
+      }
+      await refresh({ status });
+    } catch (error) {
+      setState((previous) => ({ ...previous, status: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+
   async function bulkCopySelected() {
     const ids = selectedIdsOrCurrent(state());
     if (ids.length === 0) return;
@@ -276,6 +293,7 @@ export function App(props: { config?: ResolvedTuiConfig; initialUiState?: UiStat
     setState,
     refresh,
     copySelected,
+    pastePlainSelected,
     bulkCopySelected,
     copySearchMatches,
     outputSelected,
@@ -523,6 +541,15 @@ function statusHintMode(mode: UiState["mode"]): TuiStatusHintMode {
 
 function liveSearchKey(state: UiState): string {
   return [state.query, state.pinnedOnly ? "pinned" : state.filter].join("\u0000");
+}
+
+export async function pastePlainEntry(
+  entryId: number,
+  targetWindow: string | undefined,
+  labels: ResolvedTuiConfig["labels"],
+  rpc: typeof pasteEntry = pasteEntry,
+): Promise<{ pasted: boolean; reason?: string }> {
+  return rpc(entryId, targetWindow, labels, "plain");
 }
 
 export async function copyOrPasteEntry(

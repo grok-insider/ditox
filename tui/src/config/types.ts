@@ -320,6 +320,7 @@ export const helpActionNames = [
   "previewBack",
   "pinnedView",
   "paste",
+  "pastePlain",
   "copySet",
   "output",
   "markSingle",
@@ -527,6 +528,7 @@ export type TuiLabels = {
   helpPreviewBack: string;
   helpPinnedView: string;
   helpPaste: string;
+  helpPastePlain: string;
   helpCopySet: string;
   helpOutput: string;
   helpMarkSingle: string;
@@ -563,6 +565,7 @@ export type TuiKeyBindings = {
   toggleFavorite: string[];
   delete: string[];
   copyPaste: string[];
+  pastePlain: string[];
   copyOnly: string[];
   bulkCopy: string[];
   output: string[];
@@ -1096,6 +1099,7 @@ export const defaultLabels: TuiLabels = {
   helpPreviewBack: "leave preview",
   helpPinnedView: "show pinned only",
   helpPaste: "paste selected",
+  helpPastePlain: "paste as plain text",
   helpCopySet: "copy selected",
   helpOutput: "print selected",
   helpMarkSingle: "mark / isolate / clear",
@@ -1132,6 +1136,7 @@ export const defaultKeyBindings: TuiKeyBindings = {
   toggleFavorite: ["p"],
   delete: ["d", "backspace"],
   copyPaste: ["enter"],
+  pastePlain: ["ctrl+shift+v"],
   copyOnly: ["ctrl+y"],
   bulkCopy: ["y"],
   output: ["o"],
@@ -1159,6 +1164,7 @@ export const defaultHelpOrder: TuiHelpActionName[] = [
   "preview",
   "pinnedView",
   "paste",
+  "pastePlain",
   "copySet",
   "output",
   "markSingle",

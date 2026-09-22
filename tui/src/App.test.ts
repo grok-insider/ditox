@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   copyOrPasteEntry,
+  pastePlainEntry,
   estimatedImagePreviewRows,
   fullPreviewReservedRows,
   imageProtocolCapabilities,
@@ -11,7 +12,7 @@ import {
   writeTerminalExitReset,
 } from "./App";
 import { createTestKeymap } from "@opentui/keymap/testing";
-import { browseTypeQuery } from "./keymap";
+import { browsePasteCommands, browseTypeQuery } from "./keymap";
 import { resolveTuiConfig } from "./tui-config";
 import type { Entry } from "./types";
 
@@ -33,6 +34,31 @@ const imageEntry: Entry = {
 };
 
 describe("App helpers", () => {
+  test("Enter still pastes the original and ctrl+shift+v pastes plain text", async () => {
+    const config = resolveTuiConfig();
+    expect(config.keyBindings.copyPaste).toEqual(["enter"]);
+    expect(config.keyBindings.pastePlain).toEqual(["ctrl+shift+v"]);
+    const calls: string[] = [];
+    const commands = browsePasteCommands({
+      config,
+      copySelected: async (paste) => {
+        calls.push(paste ? "original" : "copy");
+      },
+      pastePlainSelected: async () => {
+        calls.push("plain");
+      },
+    });
+    await commands.find((command) => command.key === "enter")?.cmd();
+    await commands.find((command) => command.key === "ctrl+shift+v")?.cmd();
+    expect(calls).toEqual(["original", "plain"]);
+    const requests: Array<string | undefined> = [];
+    await pastePlainEntry(4, "0xabc", config.labels, async (_id, _target, _labels, mode) => {
+      requests.push(mode);
+      return { pasted: true };
+    });
+    expect(requests).toEqual(["plain"]);
+  });
+
   test("typing an unbound character opens search and leaves movement keys alone", () => {
     const bindings = resolveTuiConfig().keyBindings;
     expect(browseTypeQuery("h", bindings)).toBe("h");

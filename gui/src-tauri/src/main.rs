@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
+use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem};
 use tauri::Manager;
 
 const OWN_WINDOW_CLASS: &str = "dev.ditox.gui";
@@ -242,8 +244,19 @@ fn main() {
         })
         .setup(|app| {
             remember_target(app.state::<AppState>().inner());
-            let _tray = tauri::tray::TrayIconBuilder::new()
+            let icon = Image::from_bytes(include_bytes!("../icons/icon.png"))?;
+            let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let tray = tauri::tray::TrayIconBuilder::with_id("ditox")
+                .icon(icon)
                 .tooltip("ditox")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click { .. } = event {
                         let app = tray.app_handle();
@@ -252,6 +265,8 @@ fn main() {
                     }
                 })
                 .build(app)?;
+            // Dropping the tray marks the indicator passive and Waybar hides it.
+            app.manage(tray);
             show_main(app.handle());
             Ok(())
         })

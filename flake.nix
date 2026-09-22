@@ -167,6 +167,10 @@
           preBuild = ''
             bun run build
           '';
+          postInstall = ''
+            install -Dm644 ${./gui/src-tauri/icons/icon.png} "$out/share/icons/hicolor/32x32/apps/dev.ditox.gui.png"
+            install -Dm644 ${./gui/dev.ditox.gui.desktop} "$out/share/applications/dev.ditox.gui.desktop"
+          '';
           preFixup = ''
             gappsWrapperArgs+=(
               --set-default WEBKIT_DISABLE_DMABUF_RENDERER 1

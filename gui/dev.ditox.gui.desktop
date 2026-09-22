@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ditox
+GenericName=Clipboard
+Comment=Clipboard history
+Exec=ditox-gui
+Icon=dev.ditox.gui
+Terminal=false
+Categories=Utility;
+StartupWMClass=dev.ditox.gui

@@ -1,4 +1,5 @@
 const std = @import("std");
+const policy = @import("policy.zig");
 
 pub const ActiveWindow = struct {
     address: []const u8,
@@ -142,7 +143,7 @@ pub fn readOffer(allocator: std.mem.Allocator, init: std.process.Init, mime: ?[]
     const result = std.process.run(allocator, init.io, .{
         .argv = argv,
         .stderr_limit = .limited(4096),
-        .stdout_limit = .limited(if (mime != null and std.mem.eql(u8, mime.?, "text")) 16 * 1024 * 1024 else 64 * 1024 * 1024),
+        .stdout_limit = .limited(if (mime != null and std.mem.eql(u8, mime.?, "text")) 16 * 1024 * 1024 else policy.max_image_read_bytes),
     }) catch |err| {
         return .{ .failed = try allocator.dupe(u8, @errorName(err)) };
     };

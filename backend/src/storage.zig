@@ -23,7 +23,7 @@ const sqlite3_bind_text_opaque = @extern(
 );
 const sqlite_transient: ?*const anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
 
-pub const current_schema_version: i64 = 3;
+pub const current_schema_version: i64 = 4;
 
 pub const Stats = struct {
     entries: i64,
@@ -116,9 +116,10 @@ pub const Storage = struct {
         try bindInt64(stmt, 4, @intCast(content.len));
         try bindNullableText(stmt, 5, source_app);
         try self.stepDone(stmt);
+        const id = c.sqlite3_last_insert_rowid(self.db);
+        try self.insertFormat(id, "text/plain", @intCast(content.len), content, null);
 
         _ = try self.applyRetention(cfg);
-        const id = c.sqlite3_last_insert_rowid(self.db);
         try self.exec("COMMIT");
         committed = true;
         return id;
@@ -172,12 +173,169 @@ pub const Storage = struct {
         try bindNullableInt64(stmt, 8, metadata.height);
         try bindNullableText(stmt, 9, source_app);
         try self.stepDone(stmt);
+        const id = c.sqlite3_last_insert_rowid(self.db);
+        try self.insertFormat(id, mime, @intCast(bytes.len), null, blob_path);
 
         _ = try self.applyRetention(cfg);
-        const id = c.sqlite3_last_insert_rowid(self.db);
         try self.exec("COMMIT");
         committed = true;
         return id;
+    }
+
+    pub const OfferFormat = struct {
+        mime: []const u8,
+        bytes: []const u8,
+        image: bool,
+    };
+
+    /// Writes one history row and every kept format in a single transaction.
+    /// A repeated primary hash replaces the sibling formats instead of keeping the first set.
+    pub fn addOffer(
+        self: *Storage,
+        cfg: config.Config,
+        kind: []const u8,
+        primary_mime: []const u8,
+        primary_bytes: []const u8,
+        preview_text: []const u8,
+        source_app: ?[]const u8,
+        formats: []const OfferFormat,
+        metadata: models.ImageMetadata,
+    ) !i64 {
+        const hash = util.sha256Hex(primary_bytes);
+        const image = std.mem.eql(u8, kind, "image");
+        try self.exec("BEGIN IMMEDIATE");
+        var committed = false;
+        errdefer if (!committed) self.exec("ROLLBACK") catch {};
+
+        if (!cfg.allow_duplicates) {
+            if (try self.findIdByHash(&hash)) |existing| {
+                try self.replaceFormats(cfg, existing, formats);
+                if (preview_text.len > 0) try self.updatePreview(existing, preview_text);
+                try self.touchLastUsed(existing, source_app);
+                _ = try self.applyRetention(cfg);
+                try self.exec("COMMIT");
+                committed = true;
+                return existing;
+            }
+        }
+
+        var blob_path: ?[]u8 = null;
+        defer if (blob_path) |path| self.allocator.free(path);
+        if (image) {
+            const written = try self.writeImageBlob(cfg, &hash, imageExtension(primary_mime), primary_bytes);
+            try self.cancelPendingBlobPrune(written);
+            blob_path = written;
+        }
+
+        const entry_preview = if (image and preview_text.len == 0)
+            try imagePreview(self.allocator, primary_mime, primary_bytes.len, metadata)
+        else
+            try util.preview(self.allocator, if (preview_text.len > 0) preview_text else primary_bytes, cfg.max_preview_chars);
+        defer self.allocator.free(entry_preview);
+
+        const stmt = try self.prepare(
+            \\INSERT INTO entries
+            \\  (kind, mime, content, preview, hash, favorite, created_at_ms, byte_len, blob_path, image_width, image_height, source_app)
+            \\VALUES
+            \\  (?, ?, ?, ?, ?, 0, CAST(strftime('%s','now') AS INTEGER) * 1000, ?, ?, ?, ?, ?)
+        );
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindText(stmt, 1, kind);
+        try bindText(stmt, 2, primary_mime);
+        if (image) try bindText(stmt, 3, &hash) else try bindText(stmt, 3, primary_bytes);
+        try bindText(stmt, 4, entry_preview);
+        try bindText(stmt, 5, &hash);
+        try bindInt64(stmt, 6, @intCast(primary_bytes.len));
+        try bindNullableText(stmt, 7, if (blob_path) |path| path else null);
+        try bindNullableInt64(stmt, 8, if (image) metadata.width else null);
+        try bindNullableInt64(stmt, 9, if (image) metadata.height else null);
+        try bindNullableText(stmt, 10, source_app);
+        try self.stepDone(stmt);
+        const id = c.sqlite3_last_insert_rowid(self.db);
+        try self.replaceFormats(cfg, id, formats);
+        _ = try self.applyRetention(cfg);
+        try self.exec("COMMIT");
+        committed = true;
+        return id;
+    }
+
+    fn updatePreview(self: *Storage, id: i64, preview_text: []const u8) !void {
+        const stmt = try self.prepare("UPDATE entries SET preview = ? WHERE id = ?");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindText(stmt, 1, preview_text);
+        try bindInt64(stmt, 2, id);
+        try self.stepDone(stmt);
+    }
+
+    fn replaceFormats(self: *Storage, cfg: config.Config, id: i64, formats: []const OfferFormat) !void {
+        const drop = try self.prepare("DELETE FROM entry_formats WHERE entry_id = ?");
+        defer _ = c.sqlite3_finalize(drop);
+        try bindInt64(drop, 1, id);
+        try self.stepDone(drop);
+        for (formats) |format| {
+            if (format.image) {
+                const hash = util.sha256Hex(format.bytes);
+                const path = try self.writeImageBlob(cfg, &hash, imageExtension(format.mime), format.bytes);
+                defer self.allocator.free(path);
+                try self.cancelPendingBlobPrune(path);
+                try self.insertFormat(id, format.mime, @intCast(format.bytes.len), null, path);
+            } else {
+                try self.insertFormat(id, format.mime, @intCast(format.bytes.len), format.bytes, null);
+            }
+        }
+    }
+
+    fn insertFormat(self: *Storage, id: i64, mime: []const u8, byte_len: i64, content: ?[]const u8, blob_path: ?[]const u8) !void {
+        const stmt = try self.prepare(
+            \\INSERT INTO entry_formats(entry_id, mime, byte_len, content, blob_path)
+            \\VALUES (?, ?, ?, ?, ?)
+        );
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindInt64(stmt, 1, id);
+        try bindText(stmt, 2, mime);
+        try bindInt64(stmt, 3, byte_len);
+        try bindNullableText(stmt, 4, content);
+        try bindNullableText(stmt, 5, blob_path);
+        try self.stepDone(stmt);
+    }
+
+    pub fn formatMimes(self: *Storage, id: i64) ![][]const u8 {
+        const stmt = try self.prepare("SELECT mime FROM entry_formats WHERE entry_id = ? ORDER BY id ASC");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindInt64(stmt, 1, id);
+        var mimes: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (mimes.items) |mime| self.allocator.free(mime);
+            mimes.deinit(self.allocator);
+        }
+        while (true) {
+            const rc = c.sqlite3_step(stmt);
+            if (rc == c.SQLITE_DONE) break;
+            if (rc != c.SQLITE_ROW) return self.sqliteError();
+            try mimes.append(self.allocator, try columnTextDup(self.allocator, stmt, 0));
+        }
+        return mimes.toOwnedSlice(self.allocator);
+    }
+
+    pub fn formatText(self: *Storage, id: i64, mime: []const u8) !?[]const u8 {
+        const stmt = try self.prepare("SELECT content FROM entry_formats WHERE entry_id = ? AND mime = ? AND content IS NOT NULL LIMIT 1");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindInt64(stmt, 1, id);
+        try bindText(stmt, 2, mime);
+        const rc = c.sqlite3_step(stmt);
+        if (rc == c.SQLITE_DONE) return null;
+        if (rc != c.SQLITE_ROW) return self.sqliteError();
+        return try columnTextDup(self.allocator, stmt, 0);
+    }
+
+    pub fn requestCapture(self: *Storage) !void {
+        try self.setRuntimeInt("capture_pending", 1);
+    }
+
+    pub fn takeCaptureRequest(self: *Storage) !bool {
+        const value = try self.getRuntimeInt("capture_pending") orelse return false;
+        try self.deleteRuntime("capture_pending");
+        return value != 0;
     }
 
     fn touchLastUsed(self: *Storage, id: i64, source_app: ?[]const u8) !void {
@@ -196,6 +354,10 @@ pub const Storage = struct {
     }
 
     pub fn list(self: *Storage, query: []const u8, filter: []const u8, limit: u32) ![]models.Entry {
+        return self.listInGroup(query, filter, limit, null);
+    }
+
+    pub fn listInGroup(self: *Storage, query: []const u8, filter: []const u8, limit: u32, group_id: ?i64) ![]models.Entry {
         var sql_writer = std.Io.Writer.Allocating.init(self.allocator);
         defer sql_writer.deinit();
         const w = &sql_writer.writer;
@@ -222,11 +384,16 @@ pub const Storage = struct {
         defer binds.deinit(self.allocator);
 
         try w.writeAll(
-            \\SELECT entries.id, entries.kind, entries.mime, entries.content, entries.preview, entries.hash, entries.favorite, entries.created_at_ms, entries.byte_len, entries.source_app, entries.blob_path, entries.image_width, entries.image_height, entries.last_used_at_ms
+            \\SELECT entries.id, entries.kind, entries.mime, entries.content, entries.preview, entries.hash, entries.favorite, entries.created_at_ms, entries.byte_len, entries.source_app, entries.blob_path, entries.image_width, entries.image_height, entries.last_used_at_ms, entries.sticky, entries.group_id
             \\FROM entries
         );
 
         try w.writeAll(" WHERE 1 = 1");
+        if (group_id) |group| {
+            const clause = try std.fmt.allocPrint(self.allocator, " AND entries.group_id = {}", .{group});
+            defer self.allocator.free(clause);
+            try w.writeAll(clause);
+        }
         if (has_query) {
             try w.writeAll(
                 \\ AND (
@@ -249,7 +416,7 @@ pub const Storage = struct {
         if (std.mem.eql(u8, filter, "today")) try w.writeAll(" AND created_at_ms >= (CAST(strftime('%s','now','start of day') AS INTEGER) * 1000)");
         if (has_query) {
             try w.writeAll(
-                \\ ORDER BY favorite DESC,
+                \\ ORDER BY sticky DESC, favorite DESC,
                 \\ CASE
                 \\   WHEN LOWER(entries.content) = LOWER(?) OR LOWER(entries.preview) = LOWER(?) THEN 0
                 \\   WHEN LOWER(entries.content) LIKE LOWER(?) ESCAPE '\' OR LOWER(entries.preview) LIKE LOWER(?) ESCAPE '\' THEN 1
@@ -272,7 +439,7 @@ pub const Storage = struct {
             try binds.append(self.allocator, trimmed_query);
             try binds.append(self.allocator, trimmed_query);
         } else {
-            try w.writeAll(" ORDER BY favorite DESC, max(created_at_ms, COALESCE(last_used_at_ms, 0)) DESC, id DESC LIMIT ?");
+            try w.writeAll(" ORDER BY sticky DESC, favorite DESC, max(created_at_ms, COALESCE(last_used_at_ms, 0)) DESC, id DESC LIMIT ?");
         }
 
         const stmt = try self.prepare(sql_writer.written());
@@ -303,7 +470,7 @@ pub const Storage = struct {
 
     pub fn get(self: *Storage, id: i64) !?models.Entry {
         const stmt = try self.prepare(
-            \\SELECT id, kind, mime, content, preview, hash, favorite, created_at_ms, byte_len, source_app, blob_path, image_width, image_height, last_used_at_ms
+            \\SELECT id, kind, mime, content, preview, hash, favorite, created_at_ms, byte_len, source_app, blob_path, image_width, image_height, last_used_at_ms, sticky, group_id
             \\FROM entries WHERE id = ?
         );
         defer _ = c.sqlite3_finalize(stmt);
@@ -323,6 +490,53 @@ pub const Storage = struct {
         const changed = c.sqlite3_changes(self.db);
         if (changed > 0) _ = try self.prunePendingBlobs();
         return changed > 0;
+    }
+
+    pub fn setSticky(self: *Storage, id: i64, sticky: bool) !bool {
+        const stmt = try self.prepare("UPDATE entries SET sticky = ? WHERE id = ?");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindInt64(stmt, 1, if (sticky) 1 else 0);
+        try bindInt64(stmt, 2, id);
+        try self.stepDone(stmt);
+        return c.sqlite3_changes(self.db) > 0;
+    }
+
+    pub fn createGroup(self: *Storage, name: []const u8) !i64 {
+        const stmt = try self.prepare("INSERT INTO groups(name, position) VALUES (?, (SELECT COALESCE(MAX(position), 0) + 1 FROM groups))");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindText(stmt, 1, name);
+        try self.stepDone(stmt);
+        return c.sqlite3_last_insert_rowid(self.db);
+    }
+
+    pub fn renameGroup(self: *Storage, id: i64, name: []const u8) !bool {
+        const stmt = try self.prepare("UPDATE groups SET name = ? WHERE id = ?");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindText(stmt, 1, name);
+        try bindInt64(stmt, 2, id);
+        try self.stepDone(stmt);
+        return c.sqlite3_changes(self.db) > 0;
+    }
+
+    pub fn deleteGroup(self: *Storage, id: i64) !bool {
+        const unset = try self.prepare("UPDATE entries SET group_id = NULL WHERE group_id = ?");
+        defer _ = c.sqlite3_finalize(unset);
+        try bindInt64(unset, 1, id);
+        try self.stepDone(unset);
+        const stmt = try self.prepare("DELETE FROM groups WHERE id = ?");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindInt64(stmt, 1, id);
+        try self.stepDone(stmt);
+        return c.sqlite3_changes(self.db) > 0;
+    }
+
+    pub fn moveToGroup(self: *Storage, id: i64, group_id: ?i64) !bool {
+        const stmt = try self.prepare("UPDATE entries SET group_id = ? WHERE id = ?");
+        defer _ = c.sqlite3_finalize(stmt);
+        try bindNullableInt64(stmt, 1, group_id);
+        try bindInt64(stmt, 2, id);
+        try self.stepDone(stmt);
+        return c.sqlite3_changes(self.db) > 0;
     }
 
     pub fn favorite(self: *Storage, id: i64, value: bool) !bool {
@@ -539,6 +753,7 @@ pub const Storage = struct {
             if (version < 1) try self.migrateToV1();
             if (version < 2) try self.migrateToV2();
             if (version < 3) try self.migrateToV3();
+            if (version < 4) try self.migrateToV4();
             try self.setSchemaVersion(current_schema_version);
 
             try self.exec("COMMIT");
@@ -563,6 +778,41 @@ pub const Storage = struct {
 
     fn migrateToV3(self: *Storage) !void {
         try self.ensureColumn("entries", "last_used_at_ms", "ALTER TABLE entries ADD COLUMN last_used_at_ms INTEGER");
+    }
+
+    fn migrateToV4(self: *Storage) !void {
+        try self.ensureColumn("entries", "sticky", "ALTER TABLE entries ADD COLUMN sticky INTEGER NOT NULL DEFAULT 0");
+        try self.exec(
+            \\CREATE TABLE IF NOT EXISTS groups (
+            \\  id INTEGER PRIMARY KEY AUTOINCREMENT,
+            \\  name TEXT NOT NULL,
+            \\  position INTEGER NOT NULL DEFAULT 0
+            \\);
+        );
+        try self.ensureColumn("entries", "group_id", "ALTER TABLE entries ADD COLUMN group_id INTEGER REFERENCES groups(id) ON DELETE SET NULL");
+        try self.exec(
+            \\CREATE TABLE IF NOT EXISTS entry_formats (
+            \\  id INTEGER PRIMARY KEY AUTOINCREMENT,
+            \\  entry_id INTEGER NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+            \\  mime TEXT NOT NULL,
+            \\  byte_len INTEGER NOT NULL,
+            \\  content TEXT,
+            \\  blob_path TEXT,
+            \\  CHECK ((content IS NULL) <> (blob_path IS NULL))
+            \\);
+            \\CREATE INDEX IF NOT EXISTS idx_entry_formats_entry ON entry_formats(entry_id);
+        );
+        try self.exec(
+            \\INSERT INTO entry_formats(entry_id, mime, byte_len, content, blob_path)
+            \\SELECT id,
+            \\  CASE WHEN kind = 'image' THEN mime ELSE 'text/plain' END,
+            \\  byte_len,
+            \\  CASE WHEN kind = 'text' THEN content ELSE NULL END,
+            \\  CASE WHEN kind = 'image' THEN blob_path ELSE NULL END
+            \\FROM entries
+            \\WHERE id NOT IN (SELECT entry_id FROM entry_formats)
+            \\  AND ((kind = 'text') OR (kind = 'image' AND blob_path IS NOT NULL AND blob_path != ''));
+        );
     }
 
     fn resetSearchSchema(self: *Storage) !void {
@@ -700,9 +950,11 @@ pub const Storage = struct {
     fn pruneImagesByBytes(self: *Storage, max_bytes: u32) !i64 {
         if (max_bytes == 0) return 0;
         const stmt = try self.prepare(
-            \\SELECT id, byte_len FROM entries
-            \\WHERE kind = 'image' AND favorite = 0
-            \\ORDER BY max(created_at_ms, COALESCE(last_used_at_ms, 0)) ASC, id ASC
+            \\SELECT e.id,
+            \\  COALESCE((SELECT SUM(f.byte_len) FROM entry_formats f WHERE f.entry_id = e.id AND f.mime LIKE 'image/%'), e.byte_len)
+            \\FROM entries e
+            \\WHERE e.favorite = 0 AND e.kind = 'image'
+            \\ORDER BY max(e.created_at_ms, COALESCE(e.last_used_at_ms, 0)) ASC, e.id ASC
         );
         defer _ = c.sqlite3_finalize(stmt);
 
@@ -784,9 +1036,14 @@ pub const Storage = struct {
     }
 
     fn blobPathReferenced(self: *Storage, path: []const u8) !bool {
-        const stmt = try self.prepare("SELECT 1 FROM entries WHERE blob_path = ? LIMIT 1");
+        const stmt = try self.prepare(
+            \\SELECT 1 FROM entries WHERE blob_path = ?
+            \\UNION SELECT 1 FROM entry_formats WHERE blob_path = ?
+            \\LIMIT 1
+        );
         defer _ = c.sqlite3_finalize(stmt);
         try bindText(stmt, 1, path);
+        try bindText(stmt, 2, path);
         const rc = c.sqlite3_step(stmt);
         if (rc == c.SQLITE_DONE) return false;
         if (rc == c.SQLITE_ROW) return true;
@@ -945,6 +1202,8 @@ pub const Storage = struct {
             .image_width = columnNullableInt64(stmt, 11),
             .image_height = columnNullableInt64(stmt, 12),
             .last_used_at_ms = columnNullableInt64(stmt, 13),
+            .sticky = c.sqlite3_column_int(stmt, 14) != 0,
+            .group_id = columnNullableInt64(stmt, 15),
         };
     }
 
@@ -1177,12 +1436,231 @@ const rest_schema =
     \\BEGIN
     \\  INSERT OR IGNORE INTO pending_blob_prunes(path) VALUES (old.blob_path);
     \\END;
+    \\CREATE TRIGGER IF NOT EXISTS entry_formats_blob_ad AFTER DELETE ON entry_formats
+    \\WHEN old.blob_path IS NOT NULL AND old.blob_path != ''
+    \\BEGIN
+    \\  INSERT OR IGNORE INTO pending_blob_prunes(path) VALUES (old.blob_path);
+    \\END;
     \\CREATE TABLE IF NOT EXISTS runtime_state (
     \\  key TEXT PRIMARY KEY,
     \\  value TEXT NOT NULL,
     \\  updated_at_ms INTEGER NOT NULL
     \\);
 ;
+
+fn openTestStore(allocator: std.mem.Allocator, data_dir: []const u8) !struct { cfg: config.Config, store: Storage } {
+    var cfg = try config.testConfig(allocator, data_dir);
+    errdefer cfg.deinit();
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cfg.image_dir);
+    const store = try Storage.open(allocator, cfg, std.testing.io);
+    return .{ .cfg = cfg, .store = store };
+}
+
+test "png-only offer stores one image row" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+    var opened = try openTestStore(allocator, data_dir);
+    defer opened.cfg.deinit();
+    defer opened.store.close();
+    const png = "\x89PNG\r\n\x1a\npng-only";
+    const formats = [_]Storage.OfferFormat{.{ .mime = "image/png", .bytes = png, .image = true }};
+    const id = try opened.store.addOffer(opened.cfg, "image", "image/png", png, "", null, &formats, .{});
+    const mimes = try opened.store.formatMimes(id);
+    defer {
+        for (mimes) |mime| allocator.free(mime);
+        allocator.free(mimes);
+    }
+    try std.testing.expectEqual(@as(usize, 1), mimes.len);
+    try std.testing.expectEqualStrings("image/png", mimes[0]);
+    const rows = try opened.store.list("", "all", 10);
+    defer {
+        for (rows) |row| row.deinit(allocator);
+        allocator.free(rows);
+    }
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+}
+
+test "png plus text/uri-list is one searchable row" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+    var opened = try openTestStore(allocator, data_dir);
+    defer opened.cfg.deinit();
+    defer opened.store.close();
+    const formats = [_]Storage.OfferFormat{
+        .{ .mime = "image/png", .bytes = "\x89PNG\r\n\x1a\nboth", .image = true },
+        .{ .mime = "image/jpeg", .bytes = "\xff\xd8\xffjpeg", .image = true },
+        .{ .mime = "text/uri-list", .bytes = "https://example.com/both", .image = false },
+    };
+    const id = try opened.store.addOffer(opened.cfg, "image", "image/png", formats[0].bytes, formats[2].bytes, null, &formats, .{});
+    const rows = try opened.store.list("example.com/both", "all", 10);
+    defer {
+        for (rows) |row| row.deinit(allocator);
+        allocator.free(rows);
+    }
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqual(id, rows[0].id);
+    try std.testing.expectEqualStrings("image", rows[0].kind);
+}
+
+test "an old row still has a format after migration without copying blob bytes" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+    var cfg = try config.testConfig(allocator, data_dir);
+    defer cfg.deinit();
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, data_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cfg.image_dir);
+    const blob_path = try std.fmt.allocPrint(allocator, "{s}/already.png", .{cfg.image_dir});
+    defer allocator.free(blob_path);
+    const blob_bytes = "\x89PNG\r\n\x1a\nlegacy-blob";
+    {
+        const file = try std.Io.Dir.cwd().createFile(std.testing.io, blob_path, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, blob_bytes);
+    }
+    const before = try std.Io.Dir.cwd().statFile(std.testing.io, blob_path, .{});
+    try execRawSqlite(allocator, cfg.db_path, v1_schema ++
+        \\ALTER TABLE entries ADD COLUMN blob_path TEXT;
+        \\ALTER TABLE entries ADD COLUMN image_width INTEGER;
+        \\ALTER TABLE entries ADD COLUMN image_height INTEGER;
+        \\ALTER TABLE entries ADD COLUMN last_used_at_ms INTEGER;
+    );
+    const insert = try std.fmt.allocPrint(allocator,
+        \\INSERT INTO entries(kind, mime, content, preview, hash, favorite, created_at_ms, byte_len, source_app, blob_path)
+        \\VALUES ('image', 'image/png', 'legacy-hash', 'legacy image', 'legacy-hash', 0, 1700000000000, {d}, 'old-app', '{s}');
+        \\PRAGMA user_version = 3;
+    , .{ blob_bytes.len, blob_path });
+    defer allocator.free(insert);
+    try execRawSqlite(allocator, cfg.db_path, insert);
+
+    var store = try Storage.open(allocator, cfg, std.testing.io);
+    defer store.close();
+    const mimes = try store.formatMimes(1);
+    defer {
+        for (mimes) |mime| allocator.free(mime);
+        allocator.free(mimes);
+    }
+    try std.testing.expectEqualStrings("image/png", mimes[0]);
+    const text = try store.formatText(1, "image/png");
+    try std.testing.expect(text == null);
+    const after = try std.Io.Dir.cwd().statFile(std.testing.io, blob_path, .{});
+    try std.testing.expectEqual(before.size, after.size);
+}
+
+test "deleting a group leaves its entries in the inbox" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+    var opened = try openTestStore(allocator, data_dir);
+    defer opened.cfg.deinit();
+    defer opened.store.close();
+    const id = try opened.store.addText(opened.cfg, "grouped text");
+    const group = try opened.store.createGroup("folder");
+    try std.testing.expect(try opened.store.moveToGroup(id, group));
+    const inside = try opened.store.listInGroup("", "all", 10, group);
+    defer {
+        for (inside) |row| row.deinit(allocator);
+        allocator.free(inside);
+    }
+    try std.testing.expectEqual(@as(usize, 1), inside.len);
+    try std.testing.expect(try opened.store.deleteGroup(group));
+    const entry = (try opened.store.get(id)).?;
+    defer entry.deinit(allocator);
+    try std.testing.expect(entry.group_id == null);
+    const gone = try opened.store.listInGroup("", "all", 10, group);
+    defer {
+        for (gone) |row| row.deinit(allocator);
+        allocator.free(gone);
+    }
+    try std.testing.expectEqual(@as(usize, 0), gone.len);
+}
+
+test "an unpinned sticky is removed by the entry cap" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+    var opened = try openTestStore(allocator, data_dir);
+    defer opened.cfg.deinit();
+    defer opened.store.close();
+    opened.cfg.max_entries = 1;
+    const older = try opened.store.addText(opened.cfg, "older sticky");
+    try std.testing.expect(try opened.store.setSticky(older, true));
+    const newer = try opened.store.addText(opened.cfg, "newer plain");
+    try std.testing.expect((try opened.store.get(older)) == null);
+    const kept = (try opened.store.get(newer)).?;
+    defer kept.deinit(allocator);
+    try std.testing.expect(!kept.sticky);
+}
+
+test "sticky rows sort ahead of newer unpinned rows" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+    var opened = try openTestStore(allocator, data_dir);
+    defer opened.cfg.deinit();
+    defer opened.store.close();
+    const older = try opened.store.addText(opened.cfg, "older sticky row");
+    _ = try opened.store.addText(opened.cfg, "newer plain row");
+    try std.testing.expect(try opened.store.setSticky(older, true));
+    const rows = try opened.store.list("", "all", 10);
+    defer {
+        for (rows) |row| row.deinit(allocator);
+        allocator.free(rows);
+    }
+    try std.testing.expectEqual(older, rows[0].id);
+    try std.testing.expect(rows[0].sticky);
+}
+
+test "an offer stores one image row and a searchable text sibling" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+    var cfg = try config.testConfig(allocator, data_dir);
+    defer cfg.deinit();
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cfg.image_dir);
+    var store = try Storage.open(allocator, cfg, std.testing.io);
+    defer store.close();
+
+    const formats = [_]Storage.OfferFormat{
+        .{ .mime = "image/png", .bytes = "\x89PNG\r\n\x1a\nhello", .image = true },
+        .{ .mime = "text/uri-list", .bytes = "https://example.com/clip", .image = false },
+    };
+    const id = try store.addOffer(cfg, "image", "image/png", formats[0].bytes, formats[1].bytes, null, &formats, .{});
+    const entry = (try store.get(id)).?;
+    defer entry.deinit(allocator);
+    try std.testing.expectEqualStrings("image", entry.kind);
+    try std.testing.expect(std.mem.indexOf(u8, entry.preview, "example.com/clip") != null);
+    const found = try store.list("example.com/clip", "all", 10);
+    defer {
+        for (found) |item| item.deinit(allocator);
+        allocator.free(found);
+    }
+    try std.testing.expectEqual(@as(usize, 1), found.len);
+
+    const group = try store.createGroup("shots");
+    try std.testing.expect(try store.moveToGroup(id, group));
+    try std.testing.expect(try store.deleteGroup(group));
+    const after = (try store.get(id)).?;
+    defer after.deinit(allocator);
+    try std.testing.expect(after.group_id == null);
+    try std.testing.expect(try store.setSticky(id, true));
+}
 
 test "storage covers add list search get favorite delete clear repair and images" {
     const allocator = std.testing.allocator;

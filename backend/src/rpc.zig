@@ -63,7 +63,8 @@ fn dispatch(allocator: std.mem.Allocator, init: std.process.Init, id_value: std.
         const query = getString(params, "query") orelse "";
         const filter = getString(params, "filter") orelse "all";
         const limit = getU32(params, "limit") orelse 50;
-        const entries = try opened.store.list(query, filter, limit);
+        const group_id = getI64(params, "group_id");
+        const entries = try opened.store.listInGroup(query, filter, limit, group_id);
         defer {
             for (entries) |entry| entry.deinit(allocator);
             allocator.free(entries);
@@ -120,7 +121,8 @@ fn dispatch(allocator: std.mem.Allocator, init: std.process.Init, id_value: std.
     if (std.mem.eql(u8, method, "entries.paste")) {
         const id = getI64(params, "id") orelse return errorResponseOwned(allocator, id_value, -32602, "missing id");
         const target_window = getString(params, "target_window");
-        return successResponseOwned(allocator, id_value, .{ .pasted = try app.pasteEntry(allocator, init, opened.cfg, &opened.store, id, target_window) });
+        const mode = getString(params, "mode") orelse "original";
+        return successResponseOwned(allocator, id_value, try app.pasteEntryMode(allocator, init, opened.cfg, &opened.store, id, target_window, mode));
     }
     if (std.mem.eql(u8, method, "entries.delete")) {
         const id = getI64(params, "id") orelse return errorResponseOwned(allocator, id_value, -32602, "missing id");
@@ -150,6 +152,43 @@ fn dispatch(allocator: std.mem.Allocator, init: std.process.Init, id_value: std.
     }
     if (std.mem.eql(u8, method, "stats.get")) {
         return successResponseOwned(allocator, id_value, try opened.store.stats());
+    }
+    if (std.mem.eql(u8, method, "clipboard.wake")) {
+        const sensitive = getBool(params, "sensitive") orelse false;
+        if (root.policy.wakeStores(sensitive)) try opened.store.requestCapture();
+        return successResponseOwned(allocator, id_value, .{ .ok = true });
+    }
+    if (std.mem.eql(u8, method, "entries.sticky")) {
+        const id = getI64(params, "id") orelse return errorResponseOwned(allocator, id_value, -32602, "missing id");
+        const sticky = getBool(params, "sticky") orelse true;
+        return successResponseOwned(allocator, id_value, .{ .updated = try opened.store.setSticky(id, sticky) });
+    }
+    if (std.mem.eql(u8, method, "groups.create")) {
+        const name = getString(params, "name") orelse return errorResponseOwned(allocator, id_value, -32602, "missing name");
+        return successResponseOwned(allocator, id_value, .{ .id = try opened.store.createGroup(name) });
+    }
+    if (std.mem.eql(u8, method, "groups.rename")) {
+        const id = getI64(params, "id") orelse return errorResponseOwned(allocator, id_value, -32602, "missing id");
+        const name = getString(params, "name") orelse return errorResponseOwned(allocator, id_value, -32602, "missing name");
+        return successResponseOwned(allocator, id_value, .{ .updated = try opened.store.renameGroup(id, name) });
+    }
+    if (std.mem.eql(u8, method, "groups.delete")) {
+        const id = getI64(params, "id") orelse return errorResponseOwned(allocator, id_value, -32602, "missing id");
+        return successResponseOwned(allocator, id_value, .{ .deleted = try opened.store.deleteGroup(id) });
+    }
+    if (std.mem.eql(u8, method, "entries.move")) {
+        const id = getI64(params, "id") orelse return errorResponseOwned(allocator, id_value, -32602, "missing id");
+        const group_id = getI64(params, "group_id");
+        return successResponseOwned(allocator, id_value, .{ .updated = try opened.store.moveToGroup(id, group_id) });
+    }
+    if (std.mem.eql(u8, method, "entries.formats")) {
+        const id = getI64(params, "id") orelse return errorResponseOwned(allocator, id_value, -32602, "missing id");
+        const mimes = try opened.store.formatMimes(id);
+        defer {
+            for (mimes) |mime| allocator.free(mime);
+            allocator.free(mimes);
+        }
+        return successResponseOwned(allocator, id_value, .{ .formats = mimes });
     }
     if (std.mem.eql(u8, method, "clipboard.ingest")) {
         const kind = getString(params, "kind") orelse "text";
@@ -274,6 +313,34 @@ fn validateParams(method: []const u8, params: ?std.json.Value) ?[]const u8 {
     if (std.mem.eql(u8, method, "entries.favorite")) return validateFavoriteParams(params);
     if (std.mem.eql(u8, method, "entries.clear")) return validateClearParams(params);
     if (std.mem.eql(u8, method, "clipboard.ingest")) return validateOptionalKeys(params, &.{ "kind", "data" });
+    if (std.mem.eql(u8, method, "clipboard.wake")) return validateOptionalKeys(params, &.{"sensitive"});
+    if (std.mem.eql(u8, method, "entries.formats") or std.mem.eql(u8, method, "groups.delete")) return validateIdParams(params);
+    if (std.mem.eql(u8, method, "entries.sticky")) {
+        if (validateRequiredKeys(params, &.{ "id", "sticky" }, &.{})) |message| return message;
+        const object = getObject(params).?;
+        if (object.get("id").? != .integer) return "invalid id";
+        if (object.get("sticky").? != .bool) return "invalid sticky";
+        return null;
+    }
+    if (std.mem.eql(u8, method, "groups.create")) {
+        if (validateRequiredKeys(params, &.{"name"}, &.{})) |message| return message;
+        if (getObject(params).?.get("name").? != .string) return "invalid name";
+        return null;
+    }
+    if (std.mem.eql(u8, method, "groups.rename")) {
+        if (validateRequiredKeys(params, &.{ "id", "name" }, &.{})) |message| return message;
+        const object = getObject(params).?;
+        if (object.get("id").? != .integer) return "invalid id";
+        if (object.get("name").? != .string) return "invalid name";
+        return null;
+    }
+    if (std.mem.eql(u8, method, "entries.move")) {
+        if (validateRequiredKeys(params, &.{"id"}, &.{"group_id"})) |message| return message;
+        const object = getObject(params).?;
+        if (object.get("id").? != .integer) return "invalid id";
+        if (object.get("group_id")) |value| if (value != .integer and value != .null) return "invalid group_id";
+        return null;
+    }
     if (std.mem.eql(u8, method, "history.pause")) return validatePauseParams(params);
     return null;
 }
@@ -286,7 +353,7 @@ fn validateNoParams(params: ?std.json.Value) ?[]const u8 {
 }
 
 fn validateListParams(params: ?std.json.Value) ?[]const u8 {
-    if (validateOptionalKeys(params, &.{ "query", "filter", "limit" })) |message| return message;
+    if (validateOptionalKeys(params, &.{ "query", "filter", "limit", "group_id" })) |message| return message;
     const object = getObject(params) orelse return null;
     if (object.get("query")) |value| if (value != .string) return "invalid query";
     if (object.get("filter")) |value| {
@@ -295,6 +362,7 @@ fn validateListParams(params: ?std.json.Value) ?[]const u8 {
     if (object.get("limit")) |value| {
         if (value != .integer or value.integer < 1 or value.integer > 1000) return "invalid limit";
     }
+    if (object.get("group_id")) |value| if (value != .integer) return "invalid group_id";
     return null;
 }
 
@@ -322,10 +390,14 @@ fn validateAddParams(params: ?std.json.Value) ?[]const u8 {
 }
 
 fn validatePasteParams(params: ?std.json.Value) ?[]const u8 {
-    if (validateRequiredKeys(params, &.{"id"}, &.{"target_window"})) |message| return message;
+    if (validateRequiredKeys(params, &.{"id"}, &.{ "target_window", "mode" })) |message| return message;
     const object = getObject(params).?;
     if (object.get("id").? != .integer) return "invalid id";
     if (object.get("target_window")) |value| if (value != .string) return "invalid target_window";
+    if (object.get("mode")) |value| {
+        if (value != .string) return "invalid mode";
+        if (!std.mem.eql(u8, value.string, "original") and !std.mem.eql(u8, value.string, "plain")) return "invalid mode";
+    }
     return null;
 }
 

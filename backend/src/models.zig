@@ -33,6 +33,8 @@ pub const Entry = struct {
     blob_path: ?[]const u8 = null,
     image_width: ?i64 = null,
     image_height: ?i64 = null,
+    sticky: bool = false,
+    group_id: ?i64 = null,
 
     pub fn deinit(self: Entry, allocator: std.mem.Allocator) void {
         allocator.free(self.kind);

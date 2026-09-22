@@ -105,6 +105,104 @@ fn clearsSelfWrite(reason: []const u8) bool {
     return reason.len == 0 or std.mem.eql(u8, reason, "self") or std.mem.eql(u8, reason, "secret");
 }
 
+pub fn storeOffer(
+    allocator: std.mem.Allocator,
+    init: std.process.Init,
+    cfg: config.Config,
+    store: *storage.Storage,
+    parts: []const policy.OfferPart,
+) !IngestResult {
+    var kept: [8]policy.PlannedPart = undefined;
+    const outcome = policy.planOffer(parts, cfg.secret_patterns, &kept);
+    switch (outcome) {
+        .empty => return .{ .stored = false, .reason = "empty" },
+        .secret => return .{ .stored = false, .reason = "secret" },
+        .store => |plan| {
+            const window = try clipboard.activeHyprlandWindow(allocator, init);
+            defer if (window) |active| active.deinit(allocator);
+            const snap: ?policy.WindowSnap = if (window) |active| .{ .class = active.class, .title = active.title } else null;
+            const primary = parts[plan.primary];
+            const image = std.mem.eql(u8, plan.kind, "image");
+            const primary_bytes = if (image) primary.bytes else policy.capUtf8(primary.bytes, cfg.max_text_bytes);
+            if (image and util.detectImageMime(primary.bytes) == null) return .{ .stored = false, .reason = "not-image" };
+            const hash = util.sha256Hex(primary_bytes);
+            const saved = try store.selfWriteHash();
+            defer if (saved) |value| allocator.free(value);
+            const decision = policy.decideCapture(.{
+                .kind = plan.kind,
+                .bytes = primary_bytes,
+                .image_mime = if (image) util.detectImageMime(primary.bytes) else null,
+                .window = snap,
+                .content_hash = &hash,
+                .self_hash = saved,
+                .excluded_apps = cfg.excluded_apps,
+                .excluded_windows = cfg.excluded_windows,
+                .secret_patterns = cfg.secret_patterns,
+            });
+            if (saved != null and clearsSelfWrite(decision.reason)) try store.clearSelfWriteHash();
+            if (!decision.store) return .{ .stored = false, .reason = decision.reason };
+
+            var formats: [8]storage.OfferFormat = undefined;
+            for (plan.kept, 0..) |part, index| {
+                const source = parts[part.index];
+                const is_image = std.mem.startsWith(u8, policy.mimeBase(source.mime), "image/");
+                formats[index] = .{
+                    .mime = policy.mimeBase(source.mime),
+                    .bytes = if (is_image) source.bytes else policy.capUtf8(source.bytes, cfg.max_text_bytes),
+                    .image = is_image,
+                };
+            }
+            const preview = if (plan.preview) |index| policy.capUtf8(parts[index].bytes, cfg.max_text_bytes) else "";
+            const id = try store.addOffer(
+                cfg,
+                plan.kind,
+                policy.mimeBase(primary.mime),
+                primary_bytes,
+                preview,
+                decision.source_app,
+                formats[0..plan.kept.len],
+                if (image) util.imageMetadata(primary.bytes, policy.mimeBase(primary.mime)) else .{},
+            );
+            return .{ .stored = true, .id = id };
+        },
+    }
+}
+
+pub const PasteResult = struct {
+    pasted: bool,
+    reason: []const u8 = "",
+};
+
+pub fn pasteEntryMode(
+    allocator: std.mem.Allocator,
+    init: std.process.Init,
+    cfg: config.Config,
+    store: *storage.Storage,
+    id: i64,
+    target_window: ?[]const u8,
+    mode: []const u8,
+) !PasteResult {
+    const entry = (try store.get(id)) orelse return .{ .pasted = false, .reason = "missing" };
+    defer entry.deinit(allocator);
+    if (std.mem.eql(u8, mode, "plain")) {
+        const owned = try store.formatText(id, "text/plain");
+        const text = owned orelse if (std.mem.eql(u8, entry.kind, "text") and std.mem.eql(u8, policy.mimeBase(entry.mime), "text/plain")) entry.content else null;
+        const plain = text orelse return .{ .pasted = false, .reason = "no-plain-text" };
+        defer if (owned) |value| allocator.free(value);
+        if (!cfg.paste_enabled) {
+            try clipboard.writeText(allocator, init, plain);
+        } else {
+            try clipboard.pasteText(allocator, init, plain, target_window, cfg.paste_buffer_ms, cfg.auto_paste_keybind);
+        }
+        const hash = util.sha256Hex(plain);
+        try store.markSelfWrite(&hash);
+        _ = try store.markUsed(entry.id);
+        return .{ .pasted = true };
+    }
+    const wrote = try pasteEntry(allocator, init, cfg, store, id, target_window);
+    return .{ .pasted = wrote };
+}
+
 pub fn configView(cfg: config.Config) ConfigView {
     return .{
         .config_path = cfg.config_path,
@@ -237,5 +335,5 @@ pub fn openStore(allocator: std.mem.Allocator, init: std.process.Init) !struct {
 pub fn readImageBlob(allocator: std.mem.Allocator, init: std.process.Init, blob_path: ?[]const u8) ![]u8 {
     const path = blob_path orelse return error.ImageBlobMissing;
     if (path.len == 0) return error.ImageBlobMissing;
-    return try std.Io.Dir.cwd().readFileAlloc(init.io, path, allocator, .limited(64 * 1024 * 1024));
+    return try std.Io.Dir.cwd().readFileAlloc(init.io, path, allocator, .limited(policy.max_image_read_bytes));
 }

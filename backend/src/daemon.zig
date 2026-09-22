@@ -17,7 +17,11 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len > 1 and std.mem.eql(u8, args[1], "ingest")) {
         const kind = if (args.len > 2) args[2] else "text";
-        try ingestStdin(allocator, init, kind);
+        if (std.mem.eql(u8, kind, "wake")) {
+            try ingestWake(allocator, init);
+        } else {
+            try ingestStdin(allocator, init, kind);
+        }
         return;
     }
     if (args.len > 1 and (std.mem.eql(u8, args[1], "daemon") or std.mem.eql(u8, args[1], "run"))) {
@@ -401,10 +405,9 @@ fn runPersistentDaemon(allocator: std.mem.Allocator, init: std.process.Init, exe
     var server = try listenRpc(allocator, init, socket_path);
     defer server.deinit(init.io);
 
-    var watches = try spawnWatches(allocator, init, exe);
-    defer {
-        for (&watches) |*watch| watch.kill(init.io);
-    }
+    const watch_argv = watchArgv(exe);
+    var watch = try spawnWatch(allocator, init, exe, &watch_argv);
+    defer watch.kill(init.io);
 
     var clients: std.ArrayList(Client) = .empty;
     defer {
@@ -416,16 +419,21 @@ fn runPersistentDaemon(allocator: std.mem.Allocator, init: std.process.Init, exe
     }
 
     while (true) {
-        var polls: [9]std.posix.pollfd = undefined;
+        const polls = try allocator.alloc(std.posix.pollfd, clients.items.len + 1);
+        defer allocator.free(polls);
         polls[0] = .{ .fd = server.socket.handle, .events = std.posix.POLL.IN, .revents = 0 };
-        const n_clients = @min(clients.items.len, polls.len - 1);
-        for (clients.items[0..n_clients], 0..) |client, index| {
+        for (clients.items, 0..) |client, index| {
             polls[index + 1] = .{ .fd = client.fd, .events = std.posix.POLL.IN, .revents = 0 };
         }
-        const ready = std.posix.poll(polls[0 .. n_clients + 1], 1000) catch 0;
+        const ready = std.posix.poll(polls, 1000) catch 0;
         opened.store.markWatcherSeen() catch {};
-        restartWatches(init, exe, &watches);
-        if (ready == 0) continue;
+        restartWatch(init, exe, &watch);
+        if (ready == 0) {
+            if (opened.store.takeCaptureRequest() catch false) {
+                captureCurrentOffer(allocator, init, opened.cfg, &opened.store);
+            }
+            continue;
+        }
         if (polls[0].revents & std.posix.POLL.IN != 0) {
             if (server.accept(init.io)) |stream| {
                 try clients.append(allocator, .{ .fd = stream.socket.handle, .pending = .empty });
@@ -434,7 +442,7 @@ fn runPersistentDaemon(allocator: std.mem.Allocator, init: std.process.Init, exe
         var index: usize = 0;
         while (index < clients.items.len) {
             const poll_index = index + 1;
-            if (poll_index >= polls.len or polls[poll_index].revents & std.posix.POLL.IN == 0) {
+            if (polls[poll_index].revents & std.posix.POLL.IN == 0) {
                 index += 1;
                 continue;
             }
@@ -483,7 +491,7 @@ fn writeAllFd(fd: std.posix.fd_t, bytes: []const u8) !void {
 }
 
 fn rpcSocketPath(allocator: std.mem.Allocator, init: std.process.Init) ![]u8 {
-    const runtime = init.environ_map.*.get("XDG_RUNTIME_DIR") orelse "/tmp";
+    const runtime = init.environ_map.*.get("XDG_RUNTIME_DIR") orelse return error.MissingRuntimeDir;
     return std.fmt.allocPrint(allocator, "{s}/ditox/rpc.sock", .{runtime});
 }
 
@@ -495,20 +503,24 @@ fn listenRpc(allocator: std.mem.Allocator, init: std.process.Init, path: []const
             .SUCCESS, .EXIST => {},
             else => return error.Unexpected,
         }
+        var stat_buf: std.posix.Stat = undefined;
+        switch (std.posix.errno(std.posix.system.stat(dir_z, &stat_buf))) {
+            .SUCCESS => {},
+            else => return error.Unexpected,
+        }
+        if (!core.policy.runtimeDirAcceptable(stat_buf.uid, stat_buf.mode, std.os.linux.getuid())) return error.Unexpected;
     }
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
     _ = std.posix.system.unlink(path_z);
     const address = try std.Io.net.UnixAddress.init(path);
-    return address.listen(init.io, .{});
+    const server = try address.listen(init.io, .{});
+    if (std.posix.system.fchmod(server.socket.handle, core.policy.socket_mode) != 0) return error.Unexpected;
+    return server;
 }
 
-fn spawnWatches(allocator: std.mem.Allocator, init: std.process.Init, exe: []const u8) ![3]std.process.Child {
-    return .{
-        try spawnWatch(allocator, init, exe, &.{ "wl-paste", "--watch", "--no-newline", "--type", "text", "--", exe, "ingest", "text" }),
-        try spawnWatch(allocator, init, exe, &.{ "wl-paste", "--watch", "--type", "image/png", "--", exe, "ingest", "image" }),
-        try spawnWatch(allocator, init, exe, &.{ "wl-paste", "--watch", "--type", "image/jpeg", "--", exe, "ingest", "image" }),
-    };
+fn watchArgv(exe: []const u8) [5][]const u8 {
+    return .{ "wl-paste", "--watch", "--", exe, "ingest", "wake" };
 }
 
 fn spawnWatch(allocator: std.mem.Allocator, init: std.process.Init, exe: []const u8, argv: []const []const u8) !std.process.Child {
@@ -522,20 +534,90 @@ fn spawnWatch(allocator: std.mem.Allocator, init: std.process.Init, exe: []const
     });
 }
 
-fn restartWatches(init: std.process.Init, exe: []const u8, watches: *[3]std.process.Child) void {
-    const specs = [_][]const []const u8{
-        &.{ "wl-paste", "--watch", "--no-newline", "--type", "text", "--", exe, "ingest", "text" },
-        &.{ "wl-paste", "--watch", "--type", "image/png", "--", exe, "ingest", "image" },
-        &.{ "wl-paste", "--watch", "--type", "image/jpeg", "--", exe, "ingest", "image" },
+fn restartWatch(init: std.process.Init, exe: []const u8, watch: *std.process.Child) void {
+    const pid = watch.id orelse return;
+    var status: c_int = 0;
+    const waited = std.posix.system.waitpid(pid, &status, 1);
+    if (waited == 0) return;
+    watch.id = null;
+    const argv = watchArgv(exe);
+    watch.* = spawnWatch(init.gpa, init, exe, &argv) catch return;
+}
+
+fn ingestWake(allocator: std.mem.Allocator, init: std.process.Init) !void {
+    const drained = core.util.readAllStdin(allocator) catch return;
+    allocator.free(drained);
+    const sensitive = core.policy.offerIsSensitive(init.environ_map.*.get("CLIPBOARD_STATE"));
+    const body = try std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"clipboard.wake\",\"params\":{{\"sensitive\":{s}}}}}", .{if (sensitive) "true" else "false"});
+    defer allocator.free(body);
+    try sendRpc(allocator, init, body);
+}
+
+fn captureCurrentOffer(allocator: std.mem.Allocator, init: std.process.Init, cfg: core.config.Config, store: *core.storage.Storage) void {
+    if (store.isWatcherPaused() catch true) return;
+    const listed = core.clipboard.listMimeTypes(allocator, init) catch return;
+    defer listed.deinit(allocator);
+    const types = switch (listed) {
+        .types => |value| value,
+        .empty => return,
+        .failed => |detail| {
+            allocator.free(detail);
+            return;
+        },
     };
-    for (watches, specs) |*watch, argv| {
-        const pid = watch.id orelse continue;
-        var status: c_int = 0;
-        const waited = std.posix.system.waitpid(pid, &status, 1);
-        if (waited == 0) continue;
-        watch.id = null;
-        watch.* = spawnWatch(init.gpa, init, exe, argv) catch continue;
+
+    var image_listed = false;
+    var image_ok = false;
+    var parts: std.ArrayList(core.policy.OfferPart) = .empty;
+    defer {
+        for (parts.items) |part| {
+            allocator.free(part.mime);
+            allocator.free(part.bytes);
+        }
+        parts.deinit(allocator);
     }
+    for (types) |mime| {
+        if (!core.policy.mimeAllowed(mime)) continue;
+        const base = core.policy.mimeBase(mime);
+        const is_image = std.mem.startsWith(u8, base, "image/");
+        if (is_image) image_listed = true;
+        const read = core.clipboard.readOffer(allocator, init, mime) catch continue;
+        switch (read) {
+            .bytes => |bytes| {
+                if (is_image and core.util.detectImageMime(bytes) == null) {
+                    allocator.free(bytes);
+                    continue;
+                }
+                const owned_mime = allocator.dupe(u8, base) catch {
+                    allocator.free(bytes);
+                    continue;
+                };
+                if (is_image) image_ok = true;
+                parts.append(allocator, .{ .mime = owned_mime, .bytes = bytes }) catch {
+                    allocator.free(owned_mime);
+                    allocator.free(bytes);
+                    continue;
+                };
+            },
+            else => read.deinit(allocator),
+        }
+    }
+    if (core.policy.dropUnreadableImage(image_listed, image_ok)) return;
+    if (parts.items.len == 0) return;
+    _ = core.app.storeOffer(allocator, init, cfg, store, parts.items) catch {};
+}
+
+fn sendRpc(allocator: std.mem.Allocator, init: std.process.Init, body: []const u8) !void {
+    const framed = try core.rpc.frame(allocator, body);
+    defer allocator.free(framed);
+    const socket_path = try rpcSocketPath(allocator, init);
+    defer allocator.free(socket_path);
+    const address = std.Io.net.UnixAddress.init(socket_path) catch return;
+    const stream = address.connect(init.io) catch return;
+    defer stream.close(init.io);
+    try writeAllFd(stream.socket.handle, framed);
+    var buf: [1024]u8 = undefined;
+    _ = std.posix.read(stream.socket.handle, &buf) catch {};
 }
 
 fn ingestStdin(allocator: std.mem.Allocator, init: std.process.Init, kind: []const u8) !void {

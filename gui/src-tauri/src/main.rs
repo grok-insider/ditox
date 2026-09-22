@@ -6,8 +6,9 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
-use tauri::Manager;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
+use tauri::window::Color;
+use tauri::{Emitter, Manager};
 
 const OWN_WINDOW_CLASS: &str = "dev.ditox.gui";
 
@@ -24,9 +25,18 @@ fn set_linux_window_class() {
     }
 }
 
+struct TransparencyChecks {
+    opaque: CheckMenuItem<tauri::Wry>,
+    ten: CheckMenuItem<tauri::Wry>,
+    twenty: CheckMenuItem<tauri::Wry>,
+    thirty: CheckMenuItem<tauri::Wry>,
+}
+
 struct AppState {
     stream: Mutex<Option<UnixStream>>,
     target: Mutex<Option<String>>,
+    transparency: Mutex<u8>,
+    checks: Mutex<Option<TransparencyChecks>>,
 }
 
 pub fn socket_path() -> Option<PathBuf> {
@@ -39,6 +49,44 @@ pub fn socket_path() -> Option<PathBuf> {
 
 pub fn connection_plan(socket_exists: bool) -> &'static str {
     if socket_exists { "connect" } else { "daemon-down" }
+}
+
+pub fn accepted_transparency(value: u64) -> u8 {
+    match value {
+        10 => 10,
+        20 => 20,
+        30 => 30,
+        _ => 0,
+    }
+}
+
+pub fn transparency_from_file(text: &str) -> u8 {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return 0;
+    };
+    let number = value.get("transparency").and_then(Value::as_u64).unwrap_or(0);
+    accepted_transparency(number)
+}
+
+pub fn read_transparency(path: &std::path::Path) -> u8 {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    transparency_from_file(&text)
+}
+
+pub fn write_transparency(path: &std::path::Path, percent: u8) -> std::io::Result<()> {
+    let percent = accepted_transparency(u64::from(percent));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, json!({ "transparency": percent }).to_string())
+}
+
+fn window_config_path() -> PathBuf {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
+    config_home.join("ditox").join("window.json")
 }
 
 pub fn paste_target(class: &str, address: &str) -> Option<String> {
@@ -197,6 +245,86 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
+fn clear_window_background(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+    }
+}
+
+fn save_transparency(app: &tauri::AppHandle, percent: u8) {
+    let percent = accepted_transparency(u64::from(percent));
+    let _ = write_transparency(&window_config_path(), percent);
+    if let Ok(mut slot) = app.state::<AppState>().transparency.lock() {
+        *slot = percent;
+    }
+    if let Ok(checks) = app.state::<AppState>().checks.lock() {
+        if let Some(checks) = checks.as_ref() {
+            let _ = checks.opaque.set_checked(percent == 0);
+            let _ = checks.ten.set_checked(percent == 10);
+            let _ = checks.twenty.set_checked(percent == 20);
+            let _ = checks.thirty.set_checked(percent == 30);
+        }
+    }
+    let _ = app.emit("ditox-transparency", percent);
+}
+
+fn emit_paste(app: &tauri::AppHandle, mode: &str) {
+    remember_target(app.state::<AppState>().inner());
+    let _ = app.emit("ditox-paste", mode.to_string());
+}
+
+fn install_tray(app: &tauri::AppHandle, percent: u8) -> tauri::Result<()> {
+    let icon = Image::from_bytes(include_bytes!("../icons/icon.png"))?;
+    let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+    let paste = MenuItem::with_id(app, "paste", "Paste", true, None::<&str>)?;
+    let paste_plain = MenuItem::with_id(app, "paste-plain", "Paste as text", true, None::<&str>)?;
+    let opaque = CheckMenuItem::with_id(app, "transparency-0", "Opaque", true, percent == 0, None::<&str>)?;
+    let ten = CheckMenuItem::with_id(app, "transparency-10", "10%", true, percent == 10, None::<&str>)?;
+    let twenty = CheckMenuItem::with_id(app, "transparency-20", "20%", true, percent == 20, None::<&str>)?;
+    let thirty = CheckMenuItem::with_id(app, "transparency-30", "30%", true, percent == 30, None::<&str>)?;
+    let transparency = Submenu::with_items(app, "Transparency", true, &[&opaque, &ten, &twenty, &thirty])?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &paste, &paste_plain, &transparency, &quit])?;
+    let tray = tauri::tray::TrayIconBuilder::with_id("ditox")
+        .icon(icon)
+        .tooltip("ditox")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => {
+                remember_target(app.state::<AppState>().inner());
+                show_main(app);
+            }
+            "paste" => emit_paste(app, "original"),
+            "paste-plain" => emit_paste(app, "plain"),
+            "transparency-0" => save_transparency(app, 0),
+            "transparency-10" => save_transparency(app, 10),
+            "transparency-20" => save_transparency(app, 20),
+            "transparency-30" => save_transparency(app, 30),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            else {
+                return;
+            };
+            let app = tray.app_handle();
+            remember_target(app.state::<AppState>().inner());
+            show_main(app);
+        })
+        .build(app)?;
+    // Dropping the tray marks the indicator passive and Waybar hides it.
+    app.manage(tray);
+    if let Ok(mut slot) = app.state::<AppState>().checks.lock() {
+        *slot = Some(TransparencyChecks { opaque, ten, twenty, thirty });
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn daemon_status() -> String {
     connection_plan(socket_path().is_some_and(|path| path.exists())).to_string()
@@ -235,38 +363,28 @@ fn hide_window(app: tauri::AppHandle) {
     }
 }
 
+#[tauri::command]
+fn window_transparency(state: tauri::State<AppState>) -> u8 {
+    state.transparency.lock().map(|value| *value).unwrap_or(0)
+}
+
 fn main() {
     set_linux_window_class();
     tauri::Builder::default()
         .manage(AppState {
             stream: Mutex::new(None),
             target: Mutex::new(None),
+            transparency: Mutex::new(0),
+            checks: Mutex::new(None),
         })
         .setup(|app| {
+            let percent = read_transparency(&window_config_path());
+            if let Ok(mut slot) = app.state::<AppState>().transparency.lock() {
+                *slot = percent;
+            }
             remember_target(app.state::<AppState>().inner());
-            let icon = Image::from_bytes(include_bytes!("../icons/icon.png"))?;
-            let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
-            let tray = tauri::tray::TrayIconBuilder::with_id("ditox")
-                .icon(icon)
-                .tooltip("ditox")
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => show_main(app),
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let tauri::tray::TrayIconEvent::Click { .. } = event {
-                        let app = tray.app_handle();
-                        remember_target(app.state::<AppState>().inner());
-                        show_main(app);
-                    }
-                })
-                .build(app)?;
-            // Dropping the tray marks the indicator passive and Waybar hides it.
-            app.manage(tray);
+            clear_window_background(app.handle());
+            install_tray(app.handle(), percent)?;
             show_main(app.handle());
             Ok(())
         })
@@ -276,7 +394,8 @@ fn main() {
             entry_image,
             paste_entry,
             captured_window,
-            hide_window
+            hide_window,
+            window_transparency
         ])
         .run(tauri::generate_context!())
         .expect("ditox gui failed to start");
@@ -284,7 +403,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{connection_plan, image_for_webview, paste_target, window_paste_target, without_blob_paths};
+    use super::{
+        accepted_transparency, connection_plan, image_for_webview, paste_target, read_transparency, transparency_from_file,
+        window_paste_target, without_blob_paths, write_transparency,
+    };
     use serde_json::json;
 
     #[test]
@@ -294,6 +416,28 @@ mod tests {
         let production = include_str!("main.rs").split("mod tests").next().unwrap();
         assert!(!production.contains("serve --stdio"));
         assert!(!production.contains("ditoxd"));
+        assert!(production.contains("Paste as text"));
+        assert!(production.contains("transparency-30"));
+    }
+
+    #[test]
+    fn transparency_accepts_only_the_menu_steps() {
+        assert_eq!(accepted_transparency(0), 0);
+        assert_eq!(accepted_transparency(10), 10);
+        assert_eq!(accepted_transparency(20), 20);
+        assert_eq!(accepted_transparency(30), 30);
+        assert_eq!(accepted_transparency(15), 0);
+        assert_eq!(accepted_transparency(300), 0);
+        assert_eq!(transparency_from_file(r#"{"transparency":20}"#), 20);
+        assert_eq!(transparency_from_file(r#"{"transparency":15}"#), 0);
+        assert_eq!(transparency_from_file("not json"), 0);
+        let dir = std::env::temp_dir().join(format!("ditox-window-test-{}", std::process::id()));
+        let path = dir.join("window.json");
+        write_transparency(&path, 30).unwrap();
+        assert_eq!(read_transparency(&path), 30);
+        write_transparency(&path, 7).unwrap();
+        assert_eq!(read_transparency(&path), 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

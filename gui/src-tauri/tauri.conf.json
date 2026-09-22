@@ -16,7 +16,12 @@
         "title": "ditox",
         "width": 720,
         "height": 560,
-        "visible": false
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "backgroundColor": "#00000000"
       }
     ],
     "security": {

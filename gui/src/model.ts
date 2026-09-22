@@ -111,6 +111,13 @@ export function selectEntry(model: PickerModel, id: number): PickerModel {
   return pickerModel(true, model.entries, index);
 }
 
+export function transparencyAlpha(percent: number): number {
+  if (percent === 10) return 0.9;
+  if (percent === 20) return 0.8;
+  if (percent === 30) return 0.7;
+  return 1;
+}
+
 export function selectionAfterKey(key: string, ctrl: boolean, shift: boolean): KeyAction {
   if (key === "ArrowDown") return { kind: "move", delta: 1 };
   if (key === "ArrowUp") return { kind: "move", delta: -1 };

@@ -13,6 +13,7 @@ import {
   refreshPicker,
   selectionAfterKey,
   shownImage,
+  transparencyAlpha,
   visiblePreview,
   type PickerEntry,
 } from "./model";
@@ -57,6 +58,18 @@ test("search filters the loaded rows", () => {
   );
   expect(html).toContain("https://example.com/clip");
   expect(html).not.toContain("hello clipboard");
+  expect(html).not.toContain(">Paste<");
+  expect(html).not.toContain(">Plain<");
+  expect(html).not.toContain("History");
+});
+
+test("transparency keeps the readable steps", () => {
+  expect(transparencyAlpha(0)).toBe(1);
+  expect(transparencyAlpha(10)).toBe(0.9);
+  expect(transparencyAlpha(20)).toBe(0.8);
+  expect(transparencyAlpha(30)).toBe(0.7);
+  expect(transparencyAlpha(15)).toBe(1);
+  expect(transparencyAlpha(40)).toBe(1);
 });
 
 test("original and plain paste are distinct requests", async () => {

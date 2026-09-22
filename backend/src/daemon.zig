@@ -465,11 +465,13 @@ fn acceptPolledClients(
         if (readClient(allocator, init, opened, &clients.items[index])) {
             index += 1;
         } else {
-            const last = clients.items.len - 1;
             _ = std.posix.system.close(clients.items[index].fd);
             clients.items[index].pending.deinit(allocator);
+            // swapRemove moves the last client into this slot. That client was
+            // polled at the old last index, so this slot's revents belong to
+            // the fd just closed. Reading the moved fd here blocks when it is idle.
             _ = clients.swapRemove(index);
-            if (last >= polled_clients) index += 1;
+            index += 1;
         }
     }
 }
@@ -844,4 +846,72 @@ test "accepting the first connection does not panic" {
     }
     acceptPolledClients(allocator, init, &opened, &polls, &clients, &server);
     try std.testing.expectEqual(@as(usize, 1), clients.items.len);
+}
+
+test "closing one of two clients returns while the other stays idle" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(root);
+    const runtime = try std.fmt.allocPrint(allocator, "{s}/run", .{root});
+    defer allocator.free(runtime);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, runtime);
+    const runtime_z = try allocator.dupeZ(u8, runtime);
+    defer allocator.free(runtime_z);
+    try std.testing.expect(std.posix.errno(std.os.linux.chmod(runtime_z, 0o700)) == .SUCCESS);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("HOME", root);
+    try env.put("XDG_CONFIG_HOME", root);
+    try env.put("XDG_DATA_HOME", root);
+    try env.put("XDG_RUNTIME_DIR", runtime);
+    const init = testingInit(&env);
+    var opened = try core.app.openStore(allocator, init);
+    defer opened.cfg.deinit();
+    defer opened.store.close();
+
+    const socket_path = try std.fmt.allocPrint(allocator, "{s}/ditox/rpc.sock", .{runtime});
+    defer allocator.free(socket_path);
+    var server = try listenRpc(allocator, init, socket_path);
+    defer server.deinit(std.testing.io);
+    const address = try std.Io.net.UnixAddress.init(socket_path);
+
+    const first = try address.connect(std.testing.io);
+    var polls = [_]std.posix.pollfd{
+        .{ .fd = server.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = -1, .events = std.posix.POLL.IN, .revents = 0 },
+        .{ .fd = -1, .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    try std.testing.expect(try std.posix.poll(polls[0..1], 1000) >= 1);
+    var clients: std.ArrayList(Client) = .empty;
+    defer {
+        for (clients.items) |*client| {
+            _ = std.posix.system.close(client.fd);
+            client.pending.deinit(allocator);
+        }
+        clients.deinit(allocator);
+    }
+    acceptPolledClients(allocator, init, &opened, polls[0..1], &clients, &server);
+    try std.testing.expectEqual(@as(usize, 1), clients.items.len);
+
+    const second = try address.connect(std.testing.io);
+    defer second.close(std.testing.io);
+    polls[0].revents = 0;
+    polls[1] = .{ .fd = clients.items[0].fd, .events = std.posix.POLL.IN, .revents = 0 };
+    try std.testing.expect(try std.posix.poll(polls[0..2], 1000) >= 1);
+    acceptPolledClients(allocator, init, &opened, polls[0..2], &clients, &server);
+    try std.testing.expectEqual(@as(usize, 2), clients.items.len);
+    const idle_fd = clients.items[1].fd;
+
+    first.close(std.testing.io);
+    polls[1] = .{ .fd = clients.items[0].fd, .events = std.posix.POLL.IN, .revents = 0 };
+    polls[2] = .{ .fd = idle_fd, .events = std.posix.POLL.IN, .revents = 0 };
+    try std.testing.expect(try std.posix.poll(&polls, 1000) >= 1);
+    try std.testing.expect(polls[1].revents & std.posix.POLL.IN != 0);
+    try std.testing.expect(polls[2].revents & std.posix.POLL.IN == 0);
+    acceptPolledClients(allocator, init, &opened, &polls, &clients, &server);
+    try std.testing.expectEqual(@as(usize, 1), clients.items.len);
+    try std.testing.expectEqual(idle_fd, clients.items[0].fd);
 }

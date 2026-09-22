@@ -97,6 +97,18 @@ cd tui && bun2nix -o bun.nix # regenerate bun.nix (bun2nix is in the dev shell)
 
 Commit both `tui/bun.lock` and `tui/bun.nix`.
 
+The desktop window is a separate package, `ditox-gui`. It is not part of
+`checks` and it is not a dependency of `ditoxd` or the user service. After
+changing `gui/package.json`, regenerate its lock and Nix deps from the repo
+root:
+
+```bash
+cd gui && bun install
+cd .. && nix develop -c bun2nix -l gui/bun.lock -o gui/bun.nix
+```
+
+Commit `gui/bun.lock` and `gui/bun.nix`.
+
 ## Workspace Layout
 
 ```text

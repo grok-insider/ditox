@@ -117,11 +117,74 @@
             platforms = systems;
           };
         };
+
+      # Separate from packageFor so ditoxd and its service do not link WebKit.
+      guiFor = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          b2n = bun2nix.packages.${system}.default;
+          bunDeps = b2n.fetchBunDeps {
+            bunNix = ./gui/bun.nix;
+          };
+        in
+        pkgs.rustPlatform.buildRustPackage {
+          pname = "ditox-gui";
+          version = "0.1.0";
+          src = pkgs.lib.cleanSourceWith {
+            src = pkgs.lib.cleanSource ./gui;
+            filter = path: _type:
+              let
+                base = baseNameOf path;
+              in
+              base != "node_modules"
+              && base != "target"
+              && base != "gen"
+              && (base != "dist" || pkgs.lib.hasInfix "/vendor/" path);
+          };
+          cargoLock.lockFile = ./gui/src-tauri/Cargo.lock;
+          cargoRoot = "src-tauri";
+          buildAndTestSubdir = "src-tauri";
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.wrapGAppsHook4
+            pkgs.bun
+            b2n.hook
+          ];
+          buildInputs = [
+            pkgs.webkitgtk_4_1
+            pkgs.libayatana-appindicator
+            pkgs.gtk3
+            pkgs.openssl
+          ];
+          inherit bunDeps;
+          bunRoot = ".";
+          bunInstallFlags = "--offline --linker=hoisted";
+          dontRunLifecycleScripts = true;
+          dontUseBunBuild = true;
+          dontUseBunCheck = true;
+          dontUseBunInstall = true;
+          doCheck = false;
+          preBuild = ''
+            bun run build
+          '';
+          preFixup = ''
+            gappsWrapperArgs+=(
+              --set-default WEBKIT_DISABLE_DMABUF_RENDERER 1
+              --prefix LD_LIBRARY_PATH : "${pkgs.lib.makeLibraryPath [ pkgs.libayatana-appindicator ]}"
+            )
+          '';
+          meta = {
+            description = "Ditox clipboard window";
+            mainProgram = "ditox-gui";
+            platforms = systems;
+          };
+        };
     in
     {
       packages = forAllSystems (system: rec {
         default = packageFor system;
         ditox = default;
+        ditox-gui = guiFor system;
       });
 
       apps = forAllSystems (system: {

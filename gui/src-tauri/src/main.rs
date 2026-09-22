@@ -9,6 +9,19 @@ use tauri::Manager;
 
 const OWN_WINDOW_CLASS: &str = "dev.ditox.gui";
 
+fn set_linux_window_class() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        extern "C" {
+            fn g_set_prgname(name: *const std::os::raw::c_char);
+            fn gdk_set_program_class(class_name: *const std::os::raw::c_char);
+        }
+        let class = c"dev.ditox.gui".as_ptr();
+        g_set_prgname(class);
+        gdk_set_program_class(class);
+    }
+}
+
 struct AppState {
     stream: Mutex<Option<UnixStream>>,
     target: Mutex<Option<String>>,
@@ -207,6 +220,7 @@ fn hide_window(app: tauri::AppHandle) {
 }
 
 fn main() {
+    set_linux_window_class();
     tauri::Builder::default()
         .manage(AppState {
             stream: Mutex::new(None),

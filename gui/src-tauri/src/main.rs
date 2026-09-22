@@ -59,6 +59,20 @@ pub fn without_blob_paths(mut value: Value) -> Value {
     value
 }
 
+fn is_standard_base64(data: &str) -> bool {
+    let bytes = data.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let pad = bytes.iter().rev().take_while(|byte| **byte == b'=').count();
+    if pad > 2 || bytes.len() == pad {
+        return false;
+    }
+    bytes[..bytes.len() - pad]
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'+' || *byte == b'/')
+}
+
 pub fn image_for_webview(value: Value) -> Result<Value, String> {
     let result = value.get("result").cloned().unwrap_or(value);
     let mime = result.get("mime").and_then(Value::as_str).unwrap_or("");
@@ -66,7 +80,7 @@ pub fn image_for_webview(value: Value) -> Result<Value, String> {
     if mime != "image/png" && mime != "image/jpeg" {
         return Err("not an image".to_string());
     }
-    if data.is_empty() || data.contains('/') || data.contains('\\') || data.contains(',') {
+    if !is_standard_base64(data) {
         return Err("not an image".to_string());
     }
     Ok(json!({ "mime": mime, "data": data }))
@@ -279,8 +293,8 @@ mod tests {
 
     #[test]
     fn the_selected_image_is_bytes_and_our_own_window_is_not_a_paste_target() {
-        let image = image_for_webview(json!({"result":{"mime":"image/png","data":"iVBORw0KGgo=","blob_path":"/tmp/secret.png"}})).unwrap();
-        assert_eq!(image, json!({"mime":"image/png","data":"iVBORw0KGgo="}));
+        let image = image_for_webview(json!({"result":{"mime":"image/png","data":"/w==","blob_path":"/tmp/secret.png"}})).unwrap();
+        assert_eq!(image, json!({"mime":"image/png","data":"/w=="}));
         assert!(image_for_webview(json!({"result":{"mime":"image/png","data":"/tmp/secret.png"}})).is_err());
         assert_eq!(
             window_paste_target(r#"{"class":"firefox","address":"0xabc"}"#).as_deref(),

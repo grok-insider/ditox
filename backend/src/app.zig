@@ -305,12 +305,12 @@ pub fn pasteEntry(
         return true;
     }
     if (!cfg.paste_enabled) {
-        try clipboard.writeText(allocator, init, entry.content);
+        try clipboard.writeBytes(allocator, init, entry.content, entry.mime);
         try store.markSelfWrite(entry.hash);
         _ = try store.markUsed(entry.id);
         return true;
     }
-    try clipboard.pasteText(allocator, init, entry.content, target_window, cfg.paste_buffer_ms, cfg.auto_paste_keybind);
+    try clipboard.pasteBytes(allocator, init, entry.content, entry.mime, target_window, cfg.paste_buffer_ms, cfg.auto_paste_keybind);
     try store.markSelfWrite(entry.hash);
     _ = try store.markUsed(entry.id);
     return true;
@@ -330,6 +330,58 @@ pub fn openStore(allocator: std.mem.Allocator, init: std.process.Init) !struct {
     errdefer store.close();
     _ = try store.applyRetention(cfg);
     return .{ .cfg = cfg, .store = store };
+}
+
+test "original paste keeps the stored text mime and plain html is refused" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+    var cfg = try config.testConfig(allocator, data_dir);
+    defer cfg.deinit();
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cfg.image_dir);
+    var store = try storage.Storage.open(allocator, cfg, std.testing.io);
+    defer store.close();
+
+    const html = "<p>hola</p>";
+    const formats = [_]storage.Storage.OfferFormat{
+        .{ .mime = "text/html", .bytes = html, .image = false },
+    };
+    const id = try store.addOffer(cfg, "text", "text/html", html, html, null, &formats, .{});
+    const mock = try std.fmt.allocPrint(allocator, "{s}/clip", .{data_dir});
+    defer allocator.free(mock);
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("DITOX_CLIPBOARD_MOCK", mock);
+    const init = testProcess(&env);
+
+    const refused = try pasteEntryMode(allocator, init, cfg, &store, id, null, "plain");
+    try std.testing.expect(!refused.pasted);
+    try std.testing.expectEqualStrings("no-plain-text", refused.reason);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(std.testing.io, mock, .{}));
+
+    const pasted = try pasteEntryMode(allocator, init, cfg, &store, id, null, "original");
+    try std.testing.expect(pasted.pasted);
+    const body = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, mock, allocator, .limited(1024));
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings(html, body);
+    const mime_path = try std.fmt.allocPrint(allocator, "{s}.mime", .{mock});
+    defer allocator.free(mime_path);
+    const mime = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, mime_path, allocator, .limited(64));
+    defer allocator.free(mime);
+    try std.testing.expectEqualStrings("text/html", mime);
+}
+
+fn testProcess(env: *std.process.Environ.Map) std.process.Init {
+    return .{
+        .minimal = undefined,
+        .arena = undefined,
+        .gpa = std.testing.allocator,
+        .io = std.testing.io,
+        .environ_map = env,
+        .preopens = undefined,
+    };
 }
 
 pub fn readImageBlob(allocator: std.mem.Allocator, init: std.process.Init, blob_path: ?[]const u8) ![]u8 {

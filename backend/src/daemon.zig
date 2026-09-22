@@ -434,25 +434,42 @@ fn runPersistentDaemon(allocator: std.mem.Allocator, init: std.process.Init, exe
             }
             continue;
         }
-        if (polls[0].revents & std.posix.POLL.IN != 0) {
-            if (server.accept(init.io)) |stream| {
-                try clients.append(allocator, .{ .fd = stream.socket.handle, .pending = .empty });
-            } else |_| {}
+        acceptPolledClients(allocator, init, &opened, polls, &clients, &server);
+    }
+}
+
+fn acceptPolledClients(
+    allocator: std.mem.Allocator,
+    init: std.process.Init,
+    opened: anytype,
+    polls: []const std.posix.pollfd,
+    clients: *std.ArrayList(Client),
+    server: *std.Io.net.Server,
+) void {
+    const polled_clients = clients.items.len;
+    if (polls.len > 0 and polls[0].revents & std.posix.POLL.IN != 0) {
+        if (server.accept(init.io)) |stream| {
+            clients.append(allocator, .{ .fd = stream.socket.handle, .pending = .empty }) catch {
+                _ = std.posix.system.close(stream.socket.handle);
+            };
+        } else |_| {}
+    }
+    var index: usize = 0;
+    while (index < polled_clients) {
+        if (index >= clients.items.len) break;
+        const poll_index = index + 1;
+        if (poll_index >= polls.len or polls[poll_index].revents & std.posix.POLL.IN == 0) {
+            index += 1;
+            continue;
         }
-        var index: usize = 0;
-        while (index < clients.items.len) {
-            const poll_index = index + 1;
-            if (polls[poll_index].revents & std.posix.POLL.IN == 0) {
-                index += 1;
-                continue;
-            }
-            if (readClient(allocator, init, &opened, &clients.items[index])) {
-                index += 1;
-            } else {
-                _ = std.posix.system.close(clients.items[index].fd);
-                clients.items[index].pending.deinit(allocator);
-                _ = clients.swapRemove(index);
-            }
+        if (readClient(allocator, init, opened, &clients.items[index])) {
+            index += 1;
+        } else {
+            const last = clients.items.len - 1;
+            _ = std.posix.system.close(clients.items[index].fd);
+            clients.items[index].pending.deinit(allocator);
+            _ = clients.swapRemove(index);
+            if (last >= polled_clients) index += 1;
         }
     }
 }
@@ -490,12 +507,26 @@ fn writeAllFd(fd: std.posix.fd_t, bytes: []const u8) !void {
     }
 }
 
+fn refuseOpenRuntimeDir(allocator: std.mem.Allocator, runtime: []const u8) !void {
+    const runtime_z = try allocator.dupeZ(u8, runtime);
+    defer allocator.free(runtime_z);
+    var stat_buf: std.os.linux.Statx = std.mem.zeroes(std.os.linux.Statx);
+    const rc = std.os.linux.statx(std.os.linux.AT.FDCWD, runtime_z, std.os.linux.AT.STATX_SYNC_AS_STAT, std.os.linux.STATX.BASIC_STATS, &stat_buf);
+    switch (std.posix.errno(rc)) {
+        .SUCCESS => {},
+        else => return error.Unexpected,
+    }
+    if (!core.policy.runtimeDirAcceptable(@intCast(stat_buf.uid), @as(u32, stat_buf.mode), @intCast(std.os.linux.getuid()))) return error.Unexpected;
+}
+
 fn rpcSocketPath(allocator: std.mem.Allocator, init: std.process.Init) ![]u8 {
     const runtime = init.environ_map.*.get("XDG_RUNTIME_DIR") orelse return error.MissingRuntimeDir;
     return std.fmt.allocPrint(allocator, "{s}/ditox/rpc.sock", .{runtime});
 }
 
 fn listenRpc(allocator: std.mem.Allocator, init: std.process.Init, path: []const u8) !std.Io.net.Server {
+    const runtime = init.environ_map.*.get("XDG_RUNTIME_DIR") orelse return error.MissingRuntimeDir;
+    try refuseOpenRuntimeDir(allocator, runtime);
     if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| {
         const dir_z = try allocator.dupeZ(u8, path[0..slash]);
         defer allocator.free(dir_z);
@@ -503,12 +534,6 @@ fn listenRpc(allocator: std.mem.Allocator, init: std.process.Init, path: []const
             .SUCCESS, .EXIST => {},
             else => return error.Unexpected,
         }
-        var stat_buf: std.posix.Stat = undefined;
-        switch (std.posix.errno(std.posix.system.stat(dir_z, &stat_buf))) {
-            .SUCCESS => {},
-            else => return error.Unexpected,
-        }
-        if (!core.policy.runtimeDirAcceptable(stat_buf.uid, stat_buf.mode, std.os.linux.getuid())) return error.Unexpected;
     }
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
@@ -736,4 +761,87 @@ test "an empty clipboard and a refused text type are not watcher failures" {
     try std.testing.expectEqual(.skip, afterTextOffer(.unavailable));
     try std.testing.expectEqual(.fail, afterTextOffer(.failed));
     try std.testing.expectEqual(.store, afterTextOffer(.bytes));
+}
+
+fn testingInit(env: *std.process.Environ.Map) std.process.Init {
+    return .{
+        .minimal = undefined,
+        .arena = undefined,
+        .gpa = std.testing.allocator,
+        .io = std.testing.io,
+        .environ_map = env,
+        .preopens = undefined,
+    };
+}
+
+test "a group-writable runtime directory is refused" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const runtime = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(runtime);
+    const runtime_z = try allocator.dupeZ(u8, runtime);
+    defer allocator.free(runtime_z);
+    try std.testing.expect(std.posix.errno(std.os.linux.chmod(runtime_z, 0o777)) == .SUCCESS);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("XDG_RUNTIME_DIR", runtime);
+    const init = testingInit(&env);
+    const socket_path = try std.fmt.allocPrint(allocator, "{s}/ditox/rpc.sock", .{runtime});
+    defer allocator.free(socket_path);
+    try std.testing.expectError(error.Unexpected, listenRpc(allocator, init, socket_path));
+
+    try std.testing.expect(std.posix.errno(std.os.linux.chmod(runtime_z, 0o700)) == .SUCCESS);
+    var server = try listenRpc(allocator, init, socket_path);
+    defer server.deinit(std.testing.io);
+}
+
+test "accepting the first connection does not panic" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(root);
+    const runtime = try std.fmt.allocPrint(allocator, "{s}/run", .{root});
+    defer allocator.free(runtime);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, runtime);
+    const runtime_z = try allocator.dupeZ(u8, runtime);
+    defer allocator.free(runtime_z);
+    try std.testing.expect(std.posix.errno(std.os.linux.chmod(runtime_z, 0o700)) == .SUCCESS);
+
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    try env.put("HOME", root);
+    try env.put("XDG_CONFIG_HOME", root);
+    try env.put("XDG_DATA_HOME", root);
+    try env.put("XDG_RUNTIME_DIR", runtime);
+    const init = testingInit(&env);
+    var opened = try core.app.openStore(allocator, init);
+    defer opened.cfg.deinit();
+    defer opened.store.close();
+
+    const socket_path = try std.fmt.allocPrint(allocator, "{s}/ditox/rpc.sock", .{runtime});
+    defer allocator.free(socket_path);
+    var server = try listenRpc(allocator, init, socket_path);
+    defer server.deinit(std.testing.io);
+
+    const address = try std.Io.net.UnixAddress.init(socket_path);
+    const stream = try address.connect(std.testing.io);
+    defer stream.close(std.testing.io);
+
+    var polls = [_]std.posix.pollfd{
+        .{ .fd = server.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    try std.testing.expect(try std.posix.poll(&polls, 1000) >= 1);
+    var clients: std.ArrayList(Client) = .empty;
+    defer {
+        for (clients.items) |*client| {
+            _ = std.posix.system.close(client.fd);
+            client.pending.deinit(allocator);
+        }
+        clients.deinit(allocator);
+    }
+    acceptPolledClients(allocator, init, &opened, &polls, &clients, &server);
+    try std.testing.expectEqual(@as(usize, 1), clients.items.len);
 }

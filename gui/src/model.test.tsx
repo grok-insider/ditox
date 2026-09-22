@@ -101,14 +101,15 @@ test("preview is escaped text plus the selected image and blob paths stay out", 
   expect(JSON.stringify(entries)).not.toContain("blob_path");
   expect(JSON.stringify(entries)).not.toContain(blobPath);
   expect(visiblePreview(entries[1]!)).toBe("<p>not html rendered</p>");
-  expect(imagePreviewSrc("image/png", "iVBORw0KGgo=")).toBe("data:image/png;base64,iVBORw0KGgo=");
+  expect(imagePreviewSrc("image/png", "/w==")).toBe("data:image/png;base64,/w==");
+  expect(shownImage("data:image/png;base64,/w==")).toBe("data:image/png;base64,/w==");
   expect(imagePreviewSrc("image/png", blobPath)).toBeNull();
   expect(shownImage(blobPath)).toBeNull();
   const html = renderToStaticMarkup(
     <PickerView
       model={pickerModel(true, entries, 0)}
       query=""
-      imageSrc={imagePreviewSrc("image/png", "iVBORw0KGgo=")}
+      imageSrc={imagePreviewSrc("image/png", "/w==")}
       onQuery={() => undefined}
       onPaste={() => undefined}
     />,
@@ -116,7 +117,7 @@ test("preview is escaped text plus the selected image and blob paths stay out", 
   expect(html).toContain("&lt;p&gt;not html rendered&lt;/p&gt;");
   expect(html).not.toContain("<p>not html rendered</p>");
   expect(html).not.toContain(blobPath);
-  expect(html).toContain("data:image/png;base64,iVBORw0KGgo=");
+  expect(html).toContain("data:image/png;base64,/w==");
   const ready = pickerModel(true, rows);
   expect(moveSelection(ready, -1)).toMatchObject({ selected: 0 });
   expect(moveSelection(ready, 5)).toMatchObject({ selected: 2 });

@@ -68,8 +68,7 @@ export function visiblePreview(entry: PickerEntry): string {
 
 export function imagePreviewSrc(mime: string, data: string): string | null {
   if (mime !== "image/png" && mime !== "image/jpeg") return null;
-  if (data.length === 0 || data.includes("/") || data.includes("\\") || data.includes(",")) return null;
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data)) return null;
+  if (!isStandardBase64(data)) return null;
   return `data:${mime};base64,${data}`;
 }
 
@@ -77,11 +76,14 @@ export function shownImage(src: string | null | undefined): string | null {
   if (!src) return null;
   const marker = ";base64,";
   const split = src.indexOf(marker);
-  if (!src.startsWith("data:image/png") && !src.startsWith("data:image/jpeg")) return null;
+  if (!src.startsWith("data:image/png;") && !src.startsWith("data:image/jpeg;")) return null;
   if (split < 0) return null;
-  const data = src.slice(split + marker.length);
-  if (data.includes("/") || data.includes("\\")) return null;
+  if (!isStandardBase64(src.slice(split + marker.length))) return null;
   return src;
+}
+
+function isStandardBase64(data: string): boolean {
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(data);
 }
 
 export function pasteRequest(id: number, mode: PasteMode, targetWindow?: string): RpcRequest {

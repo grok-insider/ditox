@@ -344,6 +344,15 @@ fn containsIgnoreCase(value: []const u8, pattern: []const u8) bool {
     return false;
 }
 
+test "the clipboard watch asks ingest to wake" {
+    const argv = watchArgv("ditoxd");
+    try std.testing.expectEqualStrings("wl-paste", argv[0]);
+    try std.testing.expectEqualStrings("--watch", argv[1]);
+    try std.testing.expectEqualStrings("ditoxd", argv[3]);
+    try std.testing.expectEqualStrings("ingest", argv[4]);
+    try std.testing.expectEqualStrings("wake", argv[5]);
+}
+
 test "framedRequestSpan parses complete Content-Length frames only" {
     // Incomplete header.
     try std.testing.expect(framedRequestSpan("Content-Length: 5\r\n") == null);
@@ -546,7 +555,7 @@ fn listenRpc(allocator: std.mem.Allocator, init: std.process.Init, path: []const
     return server;
 }
 
-fn watchArgv(exe: []const u8) [5][]const u8 {
+fn watchArgv(exe: []const u8) [6][]const u8 {
     return .{ "wl-paste", "--watch", "--", exe, "ingest", "wake" };
 }
 

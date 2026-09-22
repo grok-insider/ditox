@@ -142,7 +142,7 @@ pub fn storeOffer(
             if (saved != null and clearsSelfWrite(decision.reason)) try store.clearSelfWriteHash();
             if (!decision.store) return .{ .stored = false, .reason = decision.reason };
 
-            var formats: [8]storage.OfferFormat = undefined;
+            var formats: [8]storage.Storage.OfferFormat = undefined;
             for (plan.kept, 0..) |part, index| {
                 const source = parts[part.index];
                 const is_image = std.mem.startsWith(u8, policy.mimeBase(source.mime), "image/");
@@ -330,6 +330,25 @@ pub fn openStore(allocator: std.mem.Allocator, init: std.process.Init) !struct {
     errdefer store.close();
     _ = try store.applyRetention(cfg);
     return .{ .cfg = cfg, .store = store };
+}
+
+test "an empty offer stores nothing" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(data_dir);
+    var cfg = try config.testConfig(allocator, data_dir);
+    defer cfg.deinit();
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cfg.image_dir);
+    var store = try storage.Storage.open(allocator, cfg, std.testing.io);
+    defer store.close();
+    var env = std.process.Environ.Map.init(allocator);
+    defer env.deinit();
+    const init = testProcess(&env);
+    const result = try storeOffer(allocator, init, cfg, &store, &.{});
+    try std.testing.expect(!result.stored);
+    try std.testing.expectEqualStrings("empty", result.reason);
 }
 
 test "original paste keeps the stored text mime and plain html is refused" {

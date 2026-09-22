@@ -218,12 +218,14 @@ pub fn writeBytes(allocator: std.mem.Allocator, init: std.process.Init, bytes: [
 pub fn pasteText(allocator: std.mem.Allocator, init: std.process.Init, text: []const u8, target_window: ?[]const u8, buffer_ms: u32, keybind: []const u8) !void {
     try writeText(allocator, init, text);
     if (init.environ_map.*.get("DITOX_CLIPBOARD_MOCK") != null) return;
+    if (!policy.pasteSendsShortcut(target_window != null)) return;
     try sendPasteShortcut(allocator, init, target_window, buffer_ms, keybind);
 }
 
 pub fn pasteBytes(allocator: std.mem.Allocator, init: std.process.Init, bytes: []const u8, mime: []const u8, target_window: ?[]const u8, buffer_ms: u32, keybind: []const u8) !void {
     try writeBytes(allocator, init, bytes, mime);
     if (init.environ_map.*.get("DITOX_CLIPBOARD_MOCK") != null) return;
+    if (!policy.pasteSendsShortcut(target_window != null)) return;
     try sendPasteShortcut(allocator, init, target_window, buffer_ms, keybind);
 }
 

@@ -34,6 +34,10 @@ pub fn wakeStores(sensitive: bool) bool {
     return !sensitive;
 }
 
+pub fn pasteSendsShortcut(has_target: bool) bool {
+    return has_target;
+}
+
 pub fn dropUnreadableImage(image_listed: bool, image_ok: bool) bool {
     return image_listed and !image_ok;
 }
@@ -269,6 +273,11 @@ test "a sensitive offer stores nothing" {
     try std.testing.expect(offerIsSensitive("sensitive"));
     try std.testing.expect(!wakeStores(true));
     try std.testing.expect(wakeStores(false));
+}
+
+test "a paste without a captured window only copies" {
+    try std.testing.expect(!pasteSendsShortcut(false));
+    try std.testing.expect(pasteSendsShortcut(true));
 }
 
 test "an announced image that cannot be read is not replaced by text" {

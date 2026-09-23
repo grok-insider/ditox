@@ -10,6 +10,8 @@ import {
   pasteRequest,
   pasteSelection,
   pickerModel,
+  listRequest,
+  previewLines,
   refreshPicker,
   selectionAfterKey,
   shownImage,
@@ -53,14 +55,40 @@ test("a missing socket is daemon-down and a connected empty list is empty", asyn
 test("search filters the loaded rows", () => {
   expect(filterEntries(rows, "example.com").map((entry) => entry.id)).toEqual([2]);
   expect(filterEntries(rows, "   ").map((entry) => entry.id)).toEqual([1, 2, 3]);
+  expect(listRequest("  example.com ")).toEqual({ query: "example.com", limit: 1000 });
+  expect(pickerModel(true, [], 0, "example.com")).toEqual({ status: "no-results", query: "example.com" });
+  expect(previewLines(1)).toBe(1);
+  expect(previewLines(4)).toBe(2);
   const html = renderToStaticMarkup(
-    <PickerView model={pickerModel(true, rows)} query="example.com" onQuery={() => undefined} onPaste={() => undefined} />,
+    <PickerView model={pickerModel(true, rows)} query="" onQuery={() => undefined} onPaste={() => undefined} />,
   );
-  expect(html).toContain("https://example.com/clip");
-  expect(html).not.toContain("hello clipboard");
+  expect(html.indexOf("hello clipboard")).toBeLessThan(html.indexOf('aria-label="Search"'));
+  expect(html).toContain("…");
   expect(html).not.toContain(">Paste<");
   expect(html).not.toContain(">Plain<");
   expect(html).not.toContain("History");
+  const missed = renderToStaticMarkup(
+    <PickerView model={pickerModel(true, [], 0, "missing")} query="missing" onQuery={() => undefined} onPaste={() => undefined} />,
+  );
+  expect(missed).toContain("No results.");
+  expect(missed.indexOf("No results.")).toBeLessThan(missed.indexOf('aria-label="Search"'));
+});
+
+test("a search asks the daemon and an empty hit is no results", async () => {
+  let asked = "";
+  const model = await refreshPicker(
+    {
+      status: async () => "connect",
+      list: async (query) => {
+        asked = query;
+        return { result: { entries: [] } };
+      },
+    },
+    { status: "empty" },
+    "  clip ",
+  );
+  expect(asked).toBe("clip");
+  expect(model).toEqual({ status: "no-results", query: "clip" });
 });
 
 test("transparency keeps the readable steps", () => {

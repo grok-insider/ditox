@@ -24,15 +24,80 @@ body,
   line-height: 1.4;
 }
 
+.ditox-footer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 8px;
+}
+
 .ditox-search {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   box-sizing: border-box;
   margin: 0;
-  padding: 12px 14px 8px;
+  padding: 8px 4px;
   border: 0;
   background: transparent;
   color: inherit;
   font: inherit;
+}
+
+.ditox-more {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 6px 8px;
+}
+
+html[data-window="options"],
+html[data-window="options"] body,
+html[data-window="options"] #root {
+  background: var(--background);
+}
+
+.ditox-options {
+  min-height: 100%;
+  box-sizing: border-box;
+  padding: 16px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--fui-font-sans);
+  font-size: var(--fui-text-sm);
+}
+
+.ditox-options h1 {
+  margin: 0 0 12px;
+  font-size: var(--fui-text-md);
+  font-weight: 560;
+}
+
+.ditox-options fieldset {
+  margin: 0 0 12px;
+  padding: 8px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--fui-radius-sm);
+}
+
+.ditox-options legend {
+  padding: 0 4px;
+}
+
+.ditox-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ditox-options button {
+  border: 1px solid var(--border);
+  border-radius: var(--fui-radius-sm);
+  background: var(--accent);
+  color: var(--accent-foreground);
+  font: inherit;
+  padding: 6px 14px;
 }
 
 .ditox-search::placeholder {
@@ -88,6 +153,14 @@ body,
   overflow: hidden;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.ditox-picker[data-lines="1"] .ditox-preview {
+  -webkit-line-clamp: 1;
+}
+
+.ditox-menu-up {
+  transform: translateY(-100%);
 }
 
 .ditox-row img {

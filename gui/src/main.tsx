@@ -2,15 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "@fabrials/ui/tokens.css";
 import "@fabrials/ui/styles.css";
 import "@fabrials/ui/fonts.css";
 import "./picker.css";
+import { OptionsView } from "./Options";
 import { PickerView } from "./Picker";
 import {
   imagePreviewSrc,
+  listRequest,
   moveSelection,
   pasteSelection,
+  previewLines,
   refreshPicker,
   selectEntry,
   selectionAfterKey,
@@ -31,7 +35,7 @@ type ShellCommands = ListCommands & {
 
 const commands: ShellCommands = {
   status: () => invoke<string>("daemon_status"),
-  list: () => invoke("list_entries", { query: "" }),
+  list: (query: string) => invoke("list_entries", listRequest(query)),
   image: async (id) => {
     try {
       return await invoke<ImagePayload>("entry_image", { id });
@@ -51,34 +55,81 @@ const commands: ShellCommands = {
 
 document.documentElement.classList.add("dark");
 
-function applyTransparency(percent: number) {
-  document.documentElement.style.setProperty("--ditox-alpha", String(transparencyAlpha(percent)));
+function applySettings(settings: { transparency?: number; preview_lines?: number }) {
+  if (typeof settings.transparency === "number") {
+    document.documentElement.style.setProperty("--ditox-alpha", String(transparencyAlpha(settings.transparency)));
+  }
 }
 
-createRoot(document.getElementById("root")!).render(<PickerApp commands={commands} />);
+function windowLabel(): string {
+  try {
+    return getCurrentWindow().label;
+  } catch {
+    return "main";
+  }
+}
+
+if (windowLabel() === "options") document.documentElement.dataset.window = "options";
+
+createRoot(document.getElementById("root")!).render(windowLabel() === "options" ? <OptionsApp /> : <PickerApp commands={commands} />);
+
+function OptionsApp() {
+  const [transparency, setTransparency] = useState(0);
+  const [lines, setLines] = useState<1 | 2>(2);
+  useEffect(() => {
+    void invoke<{ transparency: number; preview_lines: number }>("window_settings")
+      .then((settings) => {
+        setTransparency(settings.transparency);
+        setLines(previewLines(settings.preview_lines));
+        applySettings(settings);
+      })
+      .catch(() => undefined);
+  }, []);
+  return (
+    <OptionsView
+      transparency={transparency}
+      previewLines={lines}
+      onTransparency={(percent) => {
+        setTransparency(percent);
+        applySettings({ transparency: percent });
+        void invoke("set_transparency", { percent });
+      }}
+      onPreviewLines={(next) => {
+        setLines(next);
+        void invoke("set_preview_lines", { lines: next });
+      }}
+      onClose={() => void invoke("hide_options")}
+    />
+  );
+}
 
 export function PickerApp(props: { commands: ShellCommands }) {
   const [model, setModel] = useState<PickerModel>({ status: "daemon-down" });
   const [query, setQuery] = useState("");
   const [imageSrc, setImageSrc] = useState<string | null>(null);
+  const [transparency, setTransparency] = useState(0);
+  const [lines, setLines] = useState<1 | 2>(2);
   const modelRef = useRef(model);
+  const queryRef = useRef(query);
   modelRef.current = model;
+  queryRef.current = query;
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      const next = await refreshPicker(props.commands, modelRef.current);
+      const next = await refreshPicker(props.commands, modelRef.current, queryRef.current);
       if (!cancelled) setModel(next);
     };
-    void load();
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void load();
     }, 1000);
+    const searchTimer = window.setTimeout(() => void load(), 150);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      window.clearTimeout(searchTimer);
     };
-  }, [props.commands]);
+  }, [props.commands, query]);
 
   useEffect(() => {
     const entry = model.status === "ready" ? model.entries[model.selected] : undefined;
@@ -100,13 +151,18 @@ export function PickerApp(props: { commands: ShellCommands }) {
     let cancel = false;
     let unlistenPaste: (() => void) | undefined;
     let unlistenAlpha: (() => void) | undefined;
-    void invoke<number>("window_transparency")
-      .then((percent) => {
-        if (!cancel) applyTransparency(percent);
+    void invoke<{ transparency: number; preview_lines: number }>("window_settings")
+      .then((settings) => {
+        if (cancel) return;
+        setTransparency(settings.transparency);
+        setLines(previewLines(settings.preview_lines));
+        applySettings(settings);
       })
       .catch(() => undefined);
-    void listen<number>("ditox-transparency", (event) => {
-      applyTransparency(event.payload);
+    void listen<{ transparency: number; preview_lines: number }>("ditox-settings", (event) => {
+      setTransparency(event.payload.transparency);
+      setLines(previewLines(event.payload.preview_lines));
+      applySettings(event.payload);
     }).then((unlisten) => {
       if (cancel) unlisten();
       else unlistenAlpha = unlisten;
@@ -157,9 +213,13 @@ export function PickerApp(props: { commands: ShellCommands }) {
       model={model}
       query={query}
       imageSrc={imageSrc}
+      previewLines={lines}
+      transparency={transparency}
       onQuery={setQuery}
       onSelect={(id) => setModel((current) => selectEntry(current, id))}
       onPaste={(id, mode: PasteMode) => void pasteSelection(props.commands, id, mode)}
+      onTransparency={(percent) => void invoke("set_transparency", { percent })}
+      onOptions={() => void invoke("open_options")}
     />
   );
 }

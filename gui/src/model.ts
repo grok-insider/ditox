@@ -9,6 +9,7 @@ export type PickerEntry = {
 export type PickerModel =
   | { status: "daemon-down" }
   | { status: "empty" }
+  | { status: "no-results"; query: string }
   | { status: "ready"; entries: PickerEntry[]; selected: number };
 
 export type PasteMode = "original" | "plain";
@@ -26,16 +27,27 @@ export type KeyAction =
 
 export type ListCommands = {
   status: () => Promise<string>;
-  list: () => Promise<unknown>;
+  list: (query: string) => Promise<unknown>;
 };
 
 export type ImagePayload = { mime: string; data: string };
 
-export function pickerModel(connected: boolean, entries: PickerEntry[], selected = 0): PickerModel {
+export function pickerModel(connected: boolean, entries: PickerEntry[], selected = 0, query = ""): PickerModel {
   if (!connected) return { status: "daemon-down" };
-  if (entries.length === 0) return { status: "empty" };
+  if (entries.length === 0) {
+    const needle = query.trim();
+    return needle.length === 0 ? { status: "empty" } : { status: "no-results", query: needle };
+  }
   const index = Math.min(Math.max(0, selected), entries.length - 1);
   return { status: "ready", entries, selected: index };
+}
+
+export function listRequest(query: string): { query: string; limit: number } {
+  return { query: query.trim(), limit: 1000 };
+}
+
+export function previewLines(value: number): 1 | 2 {
+  return value === 1 ? 1 : 2;
 }
 
 export function entriesFromList(payload: unknown): PickerEntry[] {
@@ -127,16 +139,16 @@ export function selectionAfterKey(key: string, ctrl: boolean, shift: boolean): K
   return { kind: "none" };
 }
 
-export async function refreshPicker(commands: ListCommands, previous: PickerModel): Promise<PickerModel> {
+export async function refreshPicker(commands: ListCommands, previous: PickerModel, query = ""): Promise<PickerModel> {
   try {
     const status = await commands.status();
-    if (status !== "connect") return pickerModel(false, []);
-    const entries = entriesFromList(await commands.list());
+    if (status !== "connect") return pickerModel(false, [], 0, query);
+    const entries = entriesFromList(await commands.list(listRequest(query).query));
     const previousId = previous.status === "ready" ? previous.entries[previous.selected]?.id : undefined;
     const index = previousId == null ? 0 : entries.findIndex((entry) => entry.id === previousId);
-    return pickerModel(true, entries, index < 0 ? 0 : index);
+    return pickerModel(true, entries, index < 0 ? 0 : index, query);
   } catch {
-    return pickerModel(false, []);
+    return pickerModel(false, [], 0, query);
   }
 }
 

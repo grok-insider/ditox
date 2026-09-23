@@ -1,24 +1,35 @@
 import { useEffect, useState } from "react";
-import { filterEntries, shownImage, visiblePreview, type PasteMode, type PickerEntry, type PickerModel } from "./model";
+import { shownImage, visiblePreview, type PasteMode, type PickerEntry, type PickerModel } from "./model";
+
+const TRANSPARENCY = [0, 10, 20, 30] as const;
 
 export function PickerView(props: {
   model: PickerModel;
   query: string;
   imageSrc?: string | null;
+  previewLines?: 1 | 2;
+  transparency?: number;
   onQuery: (query: string) => void;
   onSelect?: (id: number) => void;
   onPaste: (id: number, mode: PasteMode) => void;
+  onTransparency?: (percent: number) => void;
+  onOptions?: () => void;
 }) {
-  const [menu, setMenu] = useState<{ id: number; x: number; y: number } | null>(null);
+  const [rowMenu, setRowMenu] = useState<{ id: number; x: number; y: number } | null>(null);
+  const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
+  const lines = props.previewLines === 1 ? 1 : 2;
 
   useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
+    if (!rowMenu && !moreMenu) return;
+    const close = () => {
+      setRowMenu(null);
+      setMoreMenu(null);
+    };
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
-      setMenu(null);
+      close();
     };
     window.addEventListener("mousedown", close);
     window.addEventListener("keydown", onKey, true);
@@ -26,79 +37,150 @@ export function PickerView(props: {
       window.removeEventListener("mousedown", close);
       window.removeEventListener("keydown", onKey, true);
     };
-  }, [menu]);
+  }, [rowMenu, moreMenu]);
 
   if (props.model.status === "daemon-down") {
     return (
-      <section className="ditox-picker" data-density="compact">
+      <section className="ditox-picker" data-density="compact" data-lines={lines}>
         <p className="ditox-status">The daemon is down.</p>
       </section>
     );
   }
 
+  const selectedId = props.model.status === "ready" ? props.model.entries[props.model.selected]?.id : undefined;
   const search = (
-    <input
-      className="ditox-search"
-      aria-label="Search"
-      placeholder="Search"
-      value={props.query}
-      autoFocus
-      onChange={(event) => props.onQuery(event.currentTarget.value)}
-    />
+    <footer className="ditox-footer">
+      <input
+        className="ditox-search"
+        aria-label="Search"
+        placeholder="Search"
+        value={props.query}
+        autoFocus
+        onChange={(event) => props.onQuery(event.currentTarget.value)}
+      />
+      <button
+        type="button"
+        className="ditox-more"
+        aria-label="Menu"
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect();
+          setRowMenu(null);
+          setMoreMenu({ x: Math.max(8, rect.right - 180), y: Math.max(8, rect.top - 8) });
+        }}
+      >
+        …
+      </button>
+    </footer>
   );
 
-  if (props.model.status === "empty") {
-    return (
-      <section className="ditox-picker" data-density="compact">
-        {search}
-        <p className="ditox-status">Empty history.</p>
-      </section>
-    );
-  }
-
-  const entries = filterEntries(props.model.entries, props.query);
-  const selectedId = props.model.entries[props.model.selected]?.id;
   return (
-    <section className="ditox-picker" data-density="compact">
+    <section className="ditox-picker" data-density="compact" data-lines={lines}>
+      {props.model.status === "ready" ? (
+        <ul className="ditox-list">
+          {props.model.entries.map((entry) => (
+            <li key={entry.id}>
+              <PickerRow
+                entry={entry}
+                selected={entry.id === selectedId}
+                imageSrc={entry.kind === "image" && entry.id === selectedId ? props.imageSrc : null}
+                onSelect={() => props.onSelect?.(entry.id)}
+                onPaste={() => props.onPaste(entry.id, "original")}
+                onMenu={(x, y) => {
+                  props.onSelect?.(entry.id);
+                  setMoreMenu(null);
+                  setRowMenu({
+                    id: entry.id,
+                    x: Math.min(x, window.innerWidth - 168),
+                    y: Math.min(y, window.innerHeight - 72),
+                  });
+                }}
+              />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="ditox-status">{props.model.status === "empty" ? "Empty history." : "No results."}</p>
+      )}
       {search}
-      <ul className="ditox-list">
-        {entries.map((entry) => (
-          <li key={entry.id}>
-            <PickerRow
-              entry={entry}
-              selected={entry.id === selectedId}
-              imageSrc={entry.kind === "image" && entry.id === selectedId ? props.imageSrc : null}
-              onSelect={() => props.onSelect?.(entry.id)}
-              onPaste={() => props.onPaste(entry.id, "original")}
-              onMenu={(x, y) => {
-                props.onSelect?.(entry.id);
-                setMenu({
-                  id: entry.id,
-                  x: Math.min(x, window.innerWidth - 168),
-                  y: Math.min(y, window.innerHeight - 44),
-                });
-              }}
-            />
-          </li>
-        ))}
-      </ul>
-      {menu ? (
+      {rowMenu ? (
+        <div className="ditox-menu" role="menu" style={{ top: rowMenu.y, left: rowMenu.x }} onMouseDown={(event) => event.stopPropagation()}>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const id = rowMenu.id;
+              setRowMenu(null);
+              props.onPaste(id, "original");
+            }}
+          >
+            Paste
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              const id = rowMenu.id;
+              setRowMenu(null);
+              props.onPaste(id, "plain");
+            }}
+          >
+            Paste as text
+          </button>
+        </div>
+      ) : null}
+      {moreMenu ? (
         <div
-          className="ditox-menu"
+          className="ditox-menu ditox-menu-up"
           role="menu"
-          style={{ top: menu.y, left: menu.x }}
+          style={{ left: moreMenu.x, top: moreMenu.y }}
           onMouseDown={(event) => event.stopPropagation()}
         >
           <button
             type="button"
             role="menuitem"
+            disabled={selectedId == null}
             onClick={() => {
-              const id = menu.id;
-              setMenu(null);
-              props.onPaste(id, "plain");
+              setMoreMenu(null);
+              if (selectedId != null) props.onPaste(selectedId, "original");
+            }}
+          >
+            Paste
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={selectedId == null}
+            onClick={() => {
+              setMoreMenu(null);
+              if (selectedId != null) props.onPaste(selectedId, "plain");
             }}
           >
             Paste as text
+          </button>
+          {TRANSPARENCY.map((percent) => (
+            <button
+              key={percent}
+              type="button"
+              role="menuitemradio"
+              aria-checked={props.transparency === percent}
+              onClick={() => {
+                setMoreMenu(null);
+                props.onTransparency?.(percent);
+              }}
+            >
+              {percent === 0 ? "Opaque" : `${percent}%`}
+            </button>
+          ))}
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setMoreMenu(null);
+              props.onOptions?.();
+            }}
+          >
+            Options
           </button>
         </div>
       ) : null}

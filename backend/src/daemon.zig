@@ -348,9 +348,9 @@ test "the clipboard watch asks ingest to wake" {
     const argv = watchArgv("ditoxd");
     try std.testing.expectEqualStrings("wl-paste", argv[0]);
     try std.testing.expectEqualStrings("--watch", argv[1]);
-    try std.testing.expectEqualStrings("ditoxd", argv[3]);
-    try std.testing.expectEqualStrings("ingest", argv[4]);
-    try std.testing.expectEqualStrings("wake", argv[5]);
+    try std.testing.expectEqualStrings("ditoxd", argv[2]);
+    try std.testing.expectEqualStrings("ingest", argv[3]);
+    try std.testing.expectEqualStrings("wake", argv[4]);
 }
 
 test "framedRequestSpan parses complete Content-Length frames only" {
@@ -555,8 +555,9 @@ fn listenRpc(allocator: std.mem.Allocator, init: std.process.Init, path: []const
     return server;
 }
 
-fn watchArgv(exe: []const u8) [6][]const u8 {
-    return .{ "wl-paste", "--watch", "--", exe, "ingest", "wake" };
+fn watchArgv(exe: []const u8) [5][]const u8 {
+    // wl-clipboard 2.3 treats a "--" after --watch as an error and exits.
+    return .{ "wl-paste", "--watch", exe, "ingest", "wake" };
 }
 
 fn spawnWatch(allocator: std.mem.Allocator, init: std.process.Init, exe: []const u8, argv: []const []const u8) !std.process.Child {

@@ -36,6 +36,7 @@ struct AppState {
     stream: Mutex<Option<UnixStream>>,
     target: Mutex<Option<String>>,
     transparency: Mutex<u8>,
+    preview_lines: Mutex<u8>,
     checks: Mutex<Option<TransparencyChecks>>,
 }
 
@@ -68,17 +69,39 @@ pub fn transparency_from_file(text: &str) -> u8 {
     accepted_transparency(number)
 }
 
+pub fn accepted_preview_lines(value: u64) -> u8 {
+    if value == 1 { 1 } else { 2 }
+}
+
+pub fn preview_lines_from_file(text: &str) -> u8 {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return 2;
+    };
+    accepted_preview_lines(value.get("preview_lines").and_then(Value::as_u64).unwrap_or(2))
+}
+
 pub fn read_transparency(path: &std::path::Path) -> u8 {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     transparency_from_file(&text)
 }
 
-pub fn write_transparency(path: &std::path::Path, percent: u8) -> std::io::Result<()> {
+pub fn read_preview_lines(path: &std::path::Path) -> u8 {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    preview_lines_from_file(&text)
+}
+
+pub fn write_window_file(path: &std::path::Path, percent: u8, lines: u8) -> std::io::Result<()> {
     let percent = accepted_transparency(u64::from(percent));
+    let lines = accepted_preview_lines(u64::from(lines));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, json!({ "transparency": percent }).to_string())
+    std::fs::write(path, json!({ "transparency": percent, "preview_lines": lines }).to_string())
+}
+
+pub fn write_transparency(path: &std::path::Path, percent: u8) -> std::io::Result<()> {
+    let lines = read_preview_lines(path);
+    write_window_file(path, percent, lines)
 }
 
 fn window_config_path() -> PathBuf {
@@ -251,9 +274,23 @@ fn clear_window_background(app: &tauri::AppHandle) {
     }
 }
 
+fn current_preview_lines(app: &tauri::AppHandle) -> u8 {
+    app.state::<AppState>().preview_lines.lock().map(|value| *value).unwrap_or(2)
+}
+
+fn current_transparency(app: &tauri::AppHandle) -> u8 {
+    app.state::<AppState>().transparency.lock().map(|value| *value).unwrap_or(0)
+}
+
+fn emit_settings(app: &tauri::AppHandle, percent: u8, lines: u8) {
+    let _ = app.emit("ditox-settings", json!({ "transparency": percent, "preview_lines": lines }));
+    let _ = app.emit("ditox-transparency", percent);
+}
+
 fn save_transparency(app: &tauri::AppHandle, percent: u8) {
     let percent = accepted_transparency(u64::from(percent));
-    let _ = write_transparency(&window_config_path(), percent);
+    let lines = current_preview_lines(app);
+    let _ = write_window_file(&window_config_path(), percent, lines);
     if let Ok(mut slot) = app.state::<AppState>().transparency.lock() {
         *slot = percent;
     }
@@ -265,7 +302,24 @@ fn save_transparency(app: &tauri::AppHandle, percent: u8) {
             let _ = checks.thirty.set_checked(percent == 30);
         }
     }
-    let _ = app.emit("ditox-transparency", percent);
+    emit_settings(app, percent, lines);
+}
+
+fn save_preview_lines(app: &tauri::AppHandle, lines: u8) {
+    let lines = accepted_preview_lines(u64::from(lines));
+    let percent = current_transparency(app);
+    let _ = write_window_file(&window_config_path(), percent, lines);
+    if let Ok(mut slot) = app.state::<AppState>().preview_lines.lock() {
+        *slot = lines;
+    }
+    emit_settings(app, percent, lines);
+}
+
+fn show_options(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("options") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 fn emit_paste(app: &tauri::AppHandle, mode: &str) {
@@ -283,8 +337,9 @@ fn install_tray(app: &tauri::AppHandle, percent: u8) -> tauri::Result<()> {
     let twenty = CheckMenuItem::with_id(app, "transparency-20", "20%", true, percent == 20, None::<&str>)?;
     let thirty = CheckMenuItem::with_id(app, "transparency-30", "30%", true, percent == 30, None::<&str>)?;
     let transparency = Submenu::with_items(app, "Transparency", true, &[&opaque, &ten, &twenty, &thirty])?;
+    let options = MenuItem::with_id(app, "options", "Options", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &paste, &paste_plain, &transparency, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &paste, &paste_plain, &transparency, &options, &quit])?;
     let tray = tauri::tray::TrayIconBuilder::with_id("ditox")
         .icon(icon)
         .tooltip("ditox")
@@ -300,6 +355,7 @@ fn install_tray(app: &tauri::AppHandle, percent: u8) -> tauri::Result<()> {
             "transparency-10" => save_transparency(app, 10),
             "transparency-20" => save_transparency(app, 20),
             "transparency-30" => save_transparency(app, 30),
+            "options" => show_options(app),
             "quit" => app.exit(0),
             _ => {}
         })
@@ -368,6 +424,35 @@ fn window_transparency(state: tauri::State<AppState>) -> u8 {
     state.transparency.lock().map(|value| *value).unwrap_or(0)
 }
 
+#[tauri::command]
+fn window_settings(state: tauri::State<AppState>) -> Value {
+    let transparency = state.transparency.lock().map(|value| *value).unwrap_or(0);
+    let preview_lines = state.preview_lines.lock().map(|value| *value).unwrap_or(2);
+    json!({ "transparency": transparency, "preview_lines": preview_lines })
+}
+
+#[tauri::command]
+fn set_transparency(percent: u8, app: tauri::AppHandle) {
+    save_transparency(&app, percent);
+}
+
+#[tauri::command]
+fn set_preview_lines(lines: u8, app: tauri::AppHandle) {
+    save_preview_lines(&app, lines);
+}
+
+#[tauri::command]
+fn open_options(app: tauri::AppHandle) {
+    show_options(&app);
+}
+
+#[tauri::command]
+fn hide_options(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("options") {
+        let _ = window.hide();
+    }
+}
+
 fn main() {
     set_linux_window_class();
     tauri::Builder::default()
@@ -375,12 +460,18 @@ fn main() {
             stream: Mutex::new(None),
             target: Mutex::new(None),
             transparency: Mutex::new(0),
+            preview_lines: Mutex::new(2),
             checks: Mutex::new(None),
         })
         .setup(|app| {
-            let percent = read_transparency(&window_config_path());
+            let path = window_config_path();
+            let percent = read_transparency(&path);
+            let lines = read_preview_lines(&path);
             if let Ok(mut slot) = app.state::<AppState>().transparency.lock() {
                 *slot = percent;
+            }
+            if let Ok(mut slot) = app.state::<AppState>().preview_lines.lock() {
+                *slot = lines;
             }
             remember_target(app.state::<AppState>().inner());
             clear_window_background(app.handle());
@@ -395,7 +486,12 @@ fn main() {
             paste_entry,
             captured_window,
             hide_window,
-            window_transparency
+            window_transparency,
+            window_settings,
+            set_transparency,
+            set_preview_lines,
+            open_options,
+            hide_options
         ])
         .run(tauri::generate_context!())
         .expect("ditox gui failed to start");
@@ -404,8 +500,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepted_transparency, connection_plan, image_for_webview, paste_target, read_transparency, transparency_from_file,
-        window_paste_target, without_blob_paths, write_transparency,
+        accepted_preview_lines, accepted_transparency, connection_plan, image_for_webview, paste_target, preview_lines_from_file,
+        read_preview_lines, read_transparency, transparency_from_file, window_paste_target, without_blob_paths, write_transparency,
+        write_window_file,
     };
     use serde_json::json;
 
@@ -437,6 +534,15 @@ mod tests {
         assert_eq!(read_transparency(&path), 30);
         write_transparency(&path, 7).unwrap();
         assert_eq!(read_transparency(&path), 0);
+        assert_eq!(accepted_preview_lines(1), 1);
+        assert_eq!(accepted_preview_lines(2), 2);
+        assert_eq!(accepted_preview_lines(9), 2);
+        assert_eq!(preview_lines_from_file(r#"{"preview_lines":1}"#), 1);
+        assert_eq!(preview_lines_from_file("{}"), 2);
+        write_window_file(&path, 20, 1).unwrap();
+        write_transparency(&path, 10).unwrap();
+        assert_eq!(read_transparency(&path), 10);
+        assert_eq!(read_preview_lines(&path), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 

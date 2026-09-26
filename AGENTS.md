@@ -126,7 +126,7 @@ contracts/          JSON-RPC schema + fixtures (rpc.schema.json, *.rpc)
 tests/              CLI smoke tests (bun test, via assert-style spawning)
 docs/               ROADMAP, TODO, and design notes
 flake.nix           Hermetic package, devShell, apps, homeManagerModules
-.github/workflows/  CI: dual-arch nix build + push to the grok-insider cachix cache
+.github/workflows/  CI: dual-arch nix build + push to cache.fabrials.com
 ```
 
 ### Backend modules (`backend/src/`)

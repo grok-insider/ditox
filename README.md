@@ -39,8 +39,8 @@ See [`AGENTS.md`](./AGENTS.md) for the authoritative architecture overview and
 
 ## Install (Nix / NixOS)
 
-Ditox ships as a Nix flake with prebuilt closures on a public
-[Cachix](https://cachix.org) cache, so installing does **not** require building
+Ditox ships as a Nix flake with prebuilt closures on the public Fabrials binary cache
+(`https://cache.fabrials.com/fabrials`), so installing does **not** require building
 Zig or bundling the TUI locally. Prebuilt for `x86_64-linux` and `aarch64-linux`.
 
 Trust the binary cache once (otherwise Nix will rebuild from source):
@@ -55,7 +55,7 @@ nix.settings = {
 };
 ```
 
-Or, with the Cachix CLI: `cachix use grok-insider`.
+Or, with the Attic client: `attic use fabrials:fabrials` after `attic login fabrials https://cache.fabrials.com`.
 
 Then run or install:
 

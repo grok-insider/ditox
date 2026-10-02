@@ -200,3 +200,19 @@ html[data-window="options"] #root {
   background: var(--accent);
   outline: none;
 }
+
+/* Forced colours drop background and box-shadow, the only marks of the selected row and of the search focus. */
+@media (forced-colors: active) {
+  .ditox-row[data-selected="true"] {
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
+  }
+
+  .ditox-search:focus,
+  .ditox-menu button:hover,
+  .ditox-menu button:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}

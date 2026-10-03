@@ -97,10 +97,12 @@ cd tui && bun2nix -o bun.nix # regenerate bun.nix (bun2nix is in the dev shell)
 
 Commit both `tui/bun.lock` and `tui/bun.nix`.
 
-The desktop window is a separate package, `ditox-gui`. It is not part of
-`checks` and it is not a dependency of `ditoxd` or the user service. After
-changing `gui/package.json`, regenerate its lock and Nix deps from the repo
-root:
+The desktop window is a separate package, `ditox-gui`. It is not a dependency
+of `ditoxd` or the user service, but it is a flake check on x86_64-linux only
+(`checks.x86_64-linux.gui`): CI builds it, so a broken `gui/bun.nix` or
+`gui/src-tauri/Cargo.lock` cannot merge green, and the CI cache push includes
+its closure next to the TUI's. After changing `gui/package.json`, regenerate
+its lock and Nix deps from the repo root:
 
 ```bash
 cd gui && bun install
@@ -286,5 +288,6 @@ describe planned work as if it already exists.
 
 - **Nix flake** — `nix run github:grok-insider/ditox`. CI builds x86_64-linux +
   aarch64-linux and pushes closures to `https://cache.fabrials.com/fabrials` so users
-  install prebuilt (see `README.md` → Install).
+  install prebuilt (see `README.md` → Install). The window (`ditox-gui`) is built
+  and pushed on x86_64-linux only.
 - Bump `version` in `flake.nix`; tag `v*` to mark a release. CI runs on tag push.

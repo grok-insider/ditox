@@ -48,4 +48,10 @@ jobs:
           nix profile install --inputs-from . nixpkgs#attic-client
           attic login fabrials https://push.cache.fabrials.com "$ATTIC_TOKEN"
           mapfile -t paths < <(nix build .#packages.${{ matrix.system }}.default --no-link --print-out-paths)
+          # The window (ditox-gui) is a flake check on x86_64-linux only, so `nix flake check`
+          # above already built it; this resolves to the same store path without rebuilding.
+          if [ "${{ matrix.system }}" = "x86_64-linux" ]; then
+            mapfile -t gui < <(nix build .#packages.x86_64-linux.ditox-gui --no-link --print-out-paths)
+            paths+=("${gui[@]}")
+          fi
           attic push fabrials "${paths[@]}"

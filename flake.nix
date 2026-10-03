@@ -243,8 +243,15 @@
           };
         };
 
+      # `gui` is the one check that installs gui/bun.nix and compiles the Tauri crate, so a
+      # broken `gui/bun.nix` or `gui/src-tauri/Cargo.lock` can no longer merge green. It is
+      # x86_64-linux only on purpose: the aarch64 runner would pay a second Rust + WebKit
+      # compile for a failure the x86_64 build already reports (both lock files list every
+      # platform).
       checks = forAllSystems (system: {
         default = self.packages.${system}.default;
+      } // lib.optionalAttrs (system == "x86_64-linux") {
+        gui = self.packages.${system}.ditox-gui;
       });
 
       devShells = forAllSystems (system:

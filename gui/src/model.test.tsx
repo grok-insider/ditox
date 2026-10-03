@@ -245,3 +245,19 @@ test("Enter and Ctrl+Shift+V are left to the control that handles them; arrows a
   expect(selectionAfterKey("ArrowUp", false, false, fakeTarget(item))).toEqual({ kind: "move", delta: -1 });
   expect(selectionAfterKey("Escape", false, false, fakeTarget(radio))).toEqual({ kind: "hide" });
 });
+
+test("every preview resolves its own direction from its text (Arabic and Hebrew entries read right to left)", () => {
+  const mixed: PickerEntry[] = [
+    ...rows,
+    { id: 4, kind: "text", mime: "text/plain", preview: "ar", content: "مرحبا Hello world (v2.0) — تجربة: ditox!" },
+    { id: 5, kind: "image", mime: "image/png", preview: "صورة الشاشة 640x480", content: "hash" },
+  ];
+  const html = renderToStaticMarkup(
+    <PickerView model={pickerModel(true, mixed)} query="" onQuery={() => undefined} onPaste={() => undefined} />,
+  );
+  // One auto-direction preview per row, text and image entries alike.
+  expect(html.match(/<span class="ditox-preview" dir="auto">/g)?.length).toBe(mixed.length);
+  expect(html.match(/class="ditox-preview"/g)?.length).toBe(mixed.length);
+  expect(html).toContain("مرحبا Hello world (v2.0) — تجربة: ditox!");
+  expect(html).toContain("صورة الشاشة 640x480");
+});

@@ -209,7 +209,10 @@ function PickerRow(props: {
         props.onMenu(event.clientX, event.clientY);
       }}
     >
-      <span className="ditox-preview">{visiblePreview(props.entry)}</span>
+      {/* dir="auto": clipboard text is not in the UI's language. The first strong character decides the direction of the whole entry. */}
+      <span className="ditox-preview" dir="auto">
+        {visiblePreview(props.entry)}
+      </span>
       {src ? <img alt="" src={src} /> : null}
     </button>
   );

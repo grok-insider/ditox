@@ -141,7 +141,8 @@ html[data-window="options"] #root {
   background: transparent;
   color: inherit;
   font: inherit;
-  text-align: left;
+  /* start, not left: a dir="auto" preview in Arabic or Hebrew aligns to the right edge. */
+  text-align: start;
   user-select: none;
 }
 

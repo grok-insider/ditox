@@ -26,3 +26,9 @@ test("the options window is tall enough for its content, and the content scrolls
   // min-height would let the box outgrow the window so the document, not the box, scrolled and OK sat under the edge.
   expect(box).not.toMatch(/min-height/);
 });
+
+test("a row aligns its text to the start of the line, not to the left, so right-to-left previews align right", () => {
+  const row = rule(".ditox-row");
+  expect(row).toMatch(/text-align:\s*start\s*;/);
+  expect(row).not.toMatch(/text-align:\s*(left|right)/);
+});

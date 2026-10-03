@@ -130,13 +130,31 @@ export function transparencyAlpha(percent: number): number {
   return 1;
 }
 
-export function selectionAfterKey(key: string, ctrl: boolean, shift: boolean): KeyAction {
+/**
+ * Controls that run their own action when Enter activates them: the "..." button and the items of the row menus.
+ * The window-level keydown must not treat Enter or the paste shortcut as its own there: its preventDefault would
+ * cancel the click the browser fires for Enter on a focused button (and paste instead of opening the menu, pasting
+ * as text or setting the transparency). Deliberately NOT "every interactive element": the search input and the rows
+ * keep Enter, it pastes the selected row.
+ */
+export const SELF_ACTIVATING_TARGETS = '.ditox-more, [role^="menuitem"]';
+
+export function activatesItself(target: EventTarget | null | undefined): boolean {
+  const element = target as { closest?: (selector: string) => unknown } | null | undefined;
+  return typeof element?.closest === "function" && element.closest(SELF_ACTIVATING_TARGETS) != null;
+}
+
+export function selectionAfterKey(key: string, ctrl: boolean, shift: boolean, target?: EventTarget | null): KeyAction {
   if (key === "ArrowDown") return { kind: "move", delta: 1 };
   if (key === "ArrowUp") return { kind: "move", delta: -1 };
-  if (key === "Enter") return { kind: "paste", mode: "original" };
-  if (ctrl && shift && key.toLowerCase() === "v") return { kind: "paste", mode: "plain" };
+  if (key === "Enter") return pasteUnlessActivating({ kind: "paste", mode: "original" }, target);
+  if (ctrl && shift && key.toLowerCase() === "v") return pasteUnlessActivating({ kind: "paste", mode: "plain" }, target);
   if (key === "Escape") return { kind: "hide" };
   return { kind: "none" };
+}
+
+function pasteUnlessActivating(action: KeyAction, target: EventTarget | null | undefined): KeyAction {
+  return activatesItself(target) ? { kind: "none" } : action;
 }
 
 export async function refreshPicker(commands: ListCommands, previous: PickerModel, query = ""): Promise<PickerModel> {

@@ -187,7 +187,7 @@ export function PickerApp(props: { commands: ShellCommands }) {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const action = selectionAfterKey(event.key, event.ctrlKey, event.shiftKey);
+      const action = selectionAfterKey(event.key, event.ctrlKey, event.shiftKey, event.target);
       if (action.kind === "none") return;
       event.preventDefault();
       if (action.kind === "move") {

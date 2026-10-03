@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PickerView } from "./Picker";
 import {
+  SELF_ACTIVATING_TARGETS,
+  activatesItself,
   deliveryRequest,
   entriesFromList,
   filterEntries,
@@ -162,4 +165,83 @@ test("preview is escaped text plus the selected image and blob paths stay out", 
   const ready = pickerModel(true, rows);
   expect(moveSelection(ready, -1)).toMatchObject({ selected: 0 });
   expect(moveSelection(ready, 5)).toMatchObject({ selected: 2 });
+});
+
+// bun has no DOM. A tiny evaluator for exactly the selector forms SELF_ACTIVATING_TARGETS may use, run over fake nodes,
+// so these tests exercise the real exported selector string (a fake `closest` that ignored its argument proves nothing)
+// and fail loudly if the selector grows a form this evaluator does not understand.
+type FakeNode = { class?: string[]; role?: string; parent?: FakeNode };
+
+function matchesSimple(node: FakeNode, simple: string): boolean {
+  const byClass = /^\.([\w-]+)$/.exec(simple);
+  if (byClass) return node.class?.includes(byClass[1]!) ?? false;
+  const rolePrefix = /^\[role\^="([\w-]+)"\]$/.exec(simple);
+  if (rolePrefix) return node.role?.startsWith(rolePrefix[1]!) ?? false;
+  const roleExact = /^\[role="([\w-]+)"\]$/.exec(simple);
+  if (roleExact) return node.role === roleExact[1];
+  throw new Error(`the test selector evaluator does not understand "${simple}"`);
+}
+
+function fakeTarget(node: FakeNode): EventTarget {
+  return {
+    closest(selector: string) {
+      const parts = selector.split(",").map((part) => part.trim());
+      for (let current: FakeNode | undefined = node; current; current = current.parent) {
+        if (parts.some((part) => matchesSimple(current!, part))) return current;
+      }
+      return null;
+    },
+  } as unknown as EventTarget;
+}
+
+const more: FakeNode = { class: ["ditox-more"] };
+const item: FakeNode = { role: "menuitem", parent: { role: "menu", class: ["ditox-menu"] } };
+const radio: FakeNode = { role: "menuitemradio", parent: { role: "menu", class: ["ditox-menu"] } };
+const search: FakeNode = { class: ["ditox-search"] };
+const row: FakeNode = { class: ["ditox-row"] };
+
+test("the three-dots button and the menu items activate themselves on Enter; the search and the rows do not", () => {
+  for (const node of [more, item, radio, { parent: more }, { parent: item }, { parent: radio }]) {
+    expect(activatesItself(fakeTarget(node))).toBe(true);
+  }
+  // The menu container is not a control, and the search input and the rows must keep Enter (they paste the selected row).
+  for (const node of [search, row, { parent: row }, { role: "menu", class: ["ditox-menu"] }, {}]) {
+    expect(activatesItself(fakeTarget(node))).toBe(false);
+  }
+  expect(activatesItself(null)).toBe(false);
+  expect(activatesItself(undefined)).toBe(false);
+  expect(activatesItself({} as EventTarget)).toBe(false); // window, document: no `closest`
+  expect(SELF_ACTIVATING_TARGETS).toContain(".ditox-more");
+});
+
+test("the selector covers every role the menus render and the three-dots class stays in the footer", () => {
+  const source = readFileSync(new URL("./Picker.tsx", import.meta.url), "utf8");
+  const roles = [...new Set([...source.matchAll(/role="([^"]+)"/g)].map((match) => match[1]!))].filter((role) => role !== "menu");
+  expect(roles).toContain("menuitem");
+  expect(roles).toContain("menuitemradio");
+  for (const role of roles) expect(activatesItself(fakeTarget({ role }))).toBe(true);
+  const html = renderToStaticMarkup(
+    <PickerView model={pickerModel(true, rows)} query="" onQuery={() => undefined} onPaste={() => undefined} />,
+  );
+  expect(html).toContain('class="ditox-more"');
+  expect(html).toContain('class="ditox-search"');
+  expect(html).toContain('class="ditox-row"');
+});
+
+test("Enter and Ctrl+Shift+V are left to the control that handles them; arrows and Escape are not", () => {
+  expect(selectionAfterKey("Enter", false, false, fakeTarget(more))).toEqual({ kind: "none" });
+  expect(selectionAfterKey("Enter", false, false, fakeTarget(item))).toEqual({ kind: "none" });
+  expect(selectionAfterKey("Enter", false, false, fakeTarget(radio))).toEqual({ kind: "none" });
+  expect(selectionAfterKey("V", true, true, fakeTarget(more))).toEqual({ kind: "none" });
+  expect(selectionAfterKey("V", true, true, fakeTarget(item))).toEqual({ kind: "none" });
+  // Everywhere else they paste the selected row.
+  expect(selectionAfterKey("Enter", false, false, fakeTarget(search))).toEqual({ kind: "paste", mode: "original" });
+  expect(selectionAfterKey("Enter", false, false, fakeTarget(row))).toEqual({ kind: "paste", mode: "original" });
+  expect(selectionAfterKey("Enter", false, false, null)).toEqual({ kind: "paste", mode: "original" });
+  expect(selectionAfterKey("Enter", false, false)).toEqual({ kind: "paste", mode: "original" });
+  expect(selectionAfterKey("v", true, true, fakeTarget(search))).toEqual({ kind: "paste", mode: "plain" });
+  // Navigation and closing still work from the three-dots button and the menu items.
+  expect(selectionAfterKey("ArrowDown", false, false, fakeTarget(more))).toEqual({ kind: "move", delta: 1 });
+  expect(selectionAfterKey("ArrowUp", false, false, fakeTarget(item))).toEqual({ kind: "move", delta: -1 });
+  expect(selectionAfterKey("Escape", false, false, fakeTarget(radio))).toEqual({ kind: "hide" });
 });

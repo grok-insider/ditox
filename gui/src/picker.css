@@ -57,8 +57,12 @@ html[data-window="options"] #root {
   background: var(--background);
 }
 
+/* The content is about 342 px tall and the window 380: it fits. When a compositor rule or a font fallback makes the
+   window shorter, this box scrolls (min-height would grow it past the window and leave the document to scroll, which
+   hid "OK" under the window edge). */
 .ditox-options {
-  min-height: 100%;
+  height: 100%;
+  overflow: auto;
   box-sizing: border-box;
   padding: 16px;
   background: var(--background);

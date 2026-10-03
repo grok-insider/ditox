@@ -60,6 +60,8 @@ bun run test:backend    # nix develop -c zig build test
 bun run test:cli        # bun test tests/
 bun run --cwd tui test  # TUI unit + golden tests
 bun run --cwd tui typecheck
+bun run --cwd gui typecheck   # window: tsc --noEmit (needs `bun install` in gui/ first)
+bun run --cwd gui test        # window: unit tests
 
 # Run
 ./zig-out/bin/ditox add "hello"     # CLI

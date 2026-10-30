@@ -287,13 +287,12 @@ pub fn sendPasteShortcut(allocator: std.mem.Allocator, init: std.process.Init, t
     try std.Io.sleep(init.io, std.Io.Duration.fromMilliseconds(buffer_ms), .awake);
 
     if (target_window) |address| {
-        // Best effort, as before: if the window is gone the shortcut still
-        // goes to whatever has focus.
-        const focused = focusWindow(allocator, init, syntax, address) catch .failed;
+        var focused = focusWindow(allocator, init, syntax, address) catch DispatchOutcome.failed;
         if (focused == .needs_lua) {
             syntax = .lua;
-            _ = focusWindow(allocator, init, .lua, address) catch .failed;
+            focused = focusWindow(allocator, init, .lua, address) catch DispatchOutcome.failed;
         }
+        if (!shortcutMayFollowFocus(syntax, focused)) return error.PasteBackFailed;
     }
 
     var outcome = try sendShortcut(allocator, init, syntax, shortcut);
@@ -343,6 +342,17 @@ fn parseLeadingNumber(text: []const u8) ?u32 {
     while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
     if (end == 0) return null;
     return std.fmt.parseInt(u32, text[0..end], 10) catch null;
+}
+
+/// Hyprland 0.57 says whether the target window was found (`ok` or a
+/// `warning: ...`). Without it the shortcut would paste into whatever window
+/// has focus, so a stale target stops the paste there. Before 0.57 focus stays
+/// best effort, as it always was.
+fn shortcutMayFollowFocus(syntax: DispatchSyntax, focused: DispatchOutcome) bool {
+    return switch (syntax) {
+        .legacy => true,
+        .lua => focused == .ok,
+    };
 }
 
 fn focusWindow(allocator: std.mem.Allocator, init: std.process.Init, syntax: DispatchSyntax, address: []const u8) !DispatchOutcome {
@@ -670,4 +680,13 @@ test "a legacy dispatch keeps the exit status rule and spots a Lua compositor" {
     const parse_error = "error: 3 [string \"return hl.dispatch(sendshortcut CTRL,V,)\"]:1: ')' expected near 'CTRL'\n";
     try std.testing.expectEqual(DispatchOutcome.needs_lua, classifyDispatch(.legacy, .{ .exited = 7 }, parse_error, ""));
     try std.testing.expectEqual(DispatchOutcome.needs_lua, classifyDispatch(.legacy, .{ .exited = 7 }, "", parse_error));
+}
+
+test "on Hyprland 0.57 the shortcut only follows a focus that replied ok" {
+    try std.testing.expect(shortcutMayFollowFocus(.lua, .ok));
+    try std.testing.expect(!shortcutMayFollowFocus(.lua, .failed));
+    try std.testing.expect(!shortcutMayFollowFocus(.lua, classifyDispatch(.lua, .{ .exited = 0 }, "warning: =[C]:-1: hl.focus: window not found\n", "")));
+    try std.testing.expect(!shortcutMayFollowFocus(.lua, classifyDispatch(.lua, .{ .exited = 7 }, "error: 3 [string \"return hl.dispatch(x)\"]", "")));
+    try std.testing.expect(shortcutMayFollowFocus(.legacy, .ok));
+    try std.testing.expect(shortcutMayFollowFocus(.legacy, .failed));
 }

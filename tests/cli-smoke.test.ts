@@ -462,17 +462,36 @@ describe("ditox CLI smoke", () => {
     expect(rejected.exitCode).not.toBe(0);
     expect(rejected.stderr).toContain("PasteBackFailed");
 
-    // Focus stays best effort, as with the old syntax: a closed target window
-    // does not stop the shortcut.
+    // A target that Hyprland 0.57 cannot focus stops the paste before the
+    // shortcut, so it never lands in whatever window has focus.
     delete env.DITOX_FAKE_SHORTCUT_REPLY;
     delete env.DITOX_FAKE_SHORTCUT_EXIT;
-    env.DITOX_FAKE_FOCUS_REPLY = "warning: no window matched address:0xabc";
+    env.DITOX_FAKE_FOCUS_REPLY = "warning: =[C]:-1: hl.focus: window not found";
+    writeFileSync(hyprLog, "");
+    const unfocused = runResult(["paste", "1", "--target-window", "0xabc"]);
+    expect(unfocused.exitCode).not.toBe(0);
+    expect(unfocused.stderr).toContain("PasteBackFailed");
+    expect(hyprLines(hyprLog)).toEqual(["-j version", 'dispatch hl.dsp.focus({ window = "address:0xabc" })']);
+
+    env.DITOX_FAKE_FOCUS_REPLY = "error: 3 [string \"return hl.dispatch(bad)\"]:1: syntax error";
+    env.DITOX_FAKE_FOCUS_EXIT = "7";
+    writeFileSync(hyprLog, "");
+    const refused = runResult(["paste", "1", "--target-window", "0xabc"]);
+    expect(refused.exitCode).not.toBe(0);
+    expect(refused.stderr).toContain("PasteBackFailed");
+    expect(hyprLines(hyprLog)).toEqual(["-j version", 'dispatch hl.dsp.focus({ window = "address:0xabc" })']);
+
+    // Before 0.57 focus stays best effort, as it always was.
+    delete env.DITOX_FAKE_FOCUS_REPLY;
+    delete env.DITOX_FAKE_FOCUS_EXIT;
+    env.DITOX_FAKE_LEGACY_FOCUS_EXIT = "1";
+    writeFileSync(versionFile, HYPRLAND_0562_VERSION);
     writeFileSync(hyprLog, "");
     run(["paste", "1", "--target-window", "0xabc"]);
     expect(hyprLines(hyprLog)).toEqual([
       "-j version",
-      'dispatch hl.dsp.focus({ window = "address:0xabc" })',
-      'dispatch hl.dsp.send_shortcut({ mods = "CTRL", key = "V" })',
+      "dispatch focuswindow address:0xabc",
+      "dispatch sendshortcut CTRL,V,",
     ]);
   });
 
@@ -490,6 +509,19 @@ describe("ditox CLI smoke", () => {
       'dispatch hl.dsp.focus({ window = "address:0xabc" })',
       'dispatch hl.dsp.send_shortcut({ mods = "CTRL", key = "V" })',
     ]);
+
+    // After the switch to Lua the focus reply counts like any other 0.57 one.
+    env.DITOX_FAKE_FOCUS_REPLY = "warning: =[C]:-1: hl.focus: window not found";
+    writeFileSync(hyprLog, "");
+    const unfocused = runResult(["paste", "1", "--target-window", "0xabc"]);
+    expect(unfocused.exitCode).not.toBe(0);
+    expect(unfocused.stderr).toContain("PasteBackFailed");
+    expect(hyprLines(hyprLog)).toEqual([
+      "-j version",
+      "dispatch focuswindow address:0xabc",
+      'dispatch hl.dsp.focus({ window = "address:0xabc" })',
+    ]);
+    delete env.DITOX_FAKE_FOCUS_REPLY;
 
     env.DITOX_CONFIG = join(tempDir, "retry-config.toml");
     writeFileSync(env.DITOX_CONFIG, "[auto_paste]\nenabled = true\nbuffer_ms = 0\n");
@@ -1038,7 +1070,8 @@ const HYPRLAND_0570_VERSION = JSON.stringify({
  * A fake `hyprctl` that logs its argv, answers `-j version` from a file and
  * replies to dispatches like Hyprland 0.57 (`ok`, or the reply/exit status in
  * the DITOX_FAKE_* variables). With DITOX_FAKE_LUA_ONLY a legacy dispatch gets
- * the Lua parse error and exit status 7, as on a real 0.57.
+ * the Lua parse error and exit status 7, as on a real 0.57;
+ * DITOX_FAKE_LEGACY_FOCUS_EXIT makes a legacy `focuswindow` fail.
  */
 function fakeHyprland(name: string): { fakeBin: string; hyprLog: string; fakeClipboard: string; versionFile: string } {
   const fakeBin = join(tempDir, name);
@@ -1064,6 +1097,10 @@ function fakeHyprland(name: string): { fakeBin: string; hyprLog: string; fakeCli
       "  if [ -n \"$DITOX_FAKE_LUA_ONLY\" ]; then",
       "    printf 'error: 3 [string \"return hl.dispatch(%s %s)\"]:1: syntax error\\n' \"$2\" \"$3\"",
       "    exit 7",
+      "  fi",
+      "  if [ \"$2\" = \"focuswindow\" ] && [ -n \"$DITOX_FAKE_LEGACY_FOCUS_EXIT\" ]; then",
+      "    printf 'No such window found\\n'",
+      "    exit \"$DITOX_FAKE_LEGACY_FOCUS_EXIT\"",
       "  fi",
       "  printf 'ok\\n'",
       "fi",

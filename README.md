@@ -293,7 +293,10 @@ window with `hyprctl`, and dispatches the configured paste shortcut (`ctrl+v` by
 default). Each paste reads `hyprctl -j version`: Hyprland 0.57 and later get the
 Lua dispatchers (`hl.dsp.focus`, `hl.dsp.send_shortcut`), older releases get
 `focuswindow` and `sendshortcut`. If the version cannot be read, Ditox sends the
-old syntax and retries in Lua when Hyprland answers with a Lua parse error.
+old syntax and retries in Lua when Hyprland answers with a Lua parse error. On
+0.57 and later a target window that Hyprland cannot focus (any reply but `ok`)
+stops the paste before the shortcut, so it never lands in another window; older
+releases keep the best-effort focus.
 
 The watcher is the `ditoxd daemon`: a single long-lived DB-owner process running
 the full capture loop. This is the structural fix for DB-lock / stale-watcher

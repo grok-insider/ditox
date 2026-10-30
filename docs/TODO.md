@@ -25,6 +25,7 @@ Implemented with fake-tool smoke coverage:
   - Ditox refocuses the target window with `hyprctl dispatch focuswindow address:<target>` before Hyprland 0.57 and `hyprctl dispatch 'hl.dsp.focus({ window = "address:<target>" })'` from 0.57 on (version from `hyprctl -j version`, read on every paste).
   - Ditox dispatches `hyprctl dispatch sendshortcut` (before 0.57) or `hl.dsp.send_shortcut({ mods = …, key = … })` (0.57+) with the configured paste shortcut; on 0.57 only the reply `ok` counts as success (a `warning:` reply exits 0).
   - With an unreadable version, Ditox sends the old syntax and retries in Lua on Hyprland's Lua parse error.
+  - On 0.57+ a focus reply other than `ok` (e.g. `warning: … window not found`) fails the paste with `PasteBackFailed` and no shortcut is sent; before 0.57 focus stays best effort.
   - `ditox launch`, `ditox keep`, `ditox launch --keep`, `ditox -enable-real-time`, `ditox tui --enable-real-time`, and no-argument `ditox` forward the captured target window into the launched TUI command.
   - Keep-open launch variants set `DITOX_TUI_EXIT_AFTER_PASTE=false` for the launched TUI.
   - Real-time launch variants set `DITOX_TUI_REFRESH_MS=250` for the launched TUI.

@@ -402,6 +402,106 @@ describe("ditox CLI smoke", () => {
     expect(status.config.auto_paste_buffer_ms).toBe(0);
   });
 
+  test("dispatches Hyprland 0.57 paste-back as Lua and keeps the old syntax before it", () => {
+    expect(run(["add", "lua paste target"])).toBe("1");
+    const { fakeBin, hyprLog, fakeClipboard, versionFile } = fakeHyprland("lua-bin");
+    env.PATH = `${fakeBin}:${process.env.PATH ?? ""}`;
+
+    writeFileSync(versionFile, HYPRLAND_0562_VERSION);
+    run(["paste", "1", "--target-window", "0xabc"]);
+    expect(hyprLines(hyprLog)).toEqual([
+      "-j version",
+      "dispatch focuswindow address:0xabc",
+      "dispatch sendshortcut CTRL,V,",
+    ]);
+
+    writeFileSync(versionFile, HYPRLAND_0570_VERSION);
+    writeFileSync(hyprLog, "");
+    run(["paste", "1", "--target-window", "0xabc"]);
+    expect(readFileSync(fakeClipboard, "utf8")).toBe("lua paste target");
+    expect(hyprLines(hyprLog)).toEqual([
+      "-j version",
+      'dispatch hl.dsp.focus({ window = "address:0xabc" })',
+      'dispatch hl.dsp.send_shortcut({ mods = "CTRL", key = "V" })',
+    ]);
+
+    env.DITOX_CONFIG = join(tempDir, "lua-config.toml");
+    writeFileSync(env.DITOX_CONFIG, "[auto_paste]\nenabled = true\nkeybind = \"ctrl+shift+v\"\nbuffer_ms = 0\n");
+    writeFileSync(hyprLog, "");
+    run(["--auto-paste", "--target-window", "0xabc"]);
+    expect(hyprLines(hyprLog)).toEqual([
+      "-j version",
+      'dispatch hl.dsp.focus({ window = "address:0xabc" })',
+      'dispatch hl.dsp.send_shortcut({ mods = "CTRL SHIFT", key = "V" })',
+    ]);
+
+    // The target comes from the command line or the environment; it must
+    // stay inside its Lua string.
+    writeFileSync(hyprLog, "");
+    run(["paste", "1", "--target-window", '0xabc" }) hl.dsp.exec_cmd("touch pwned") --\\']);
+    expect(hyprLines(hyprLog)[1]).toBe(
+      'dispatch hl.dsp.focus({ window = "address:0xabc\\" }) hl.dsp.exec_cmd(\\"touch pwned\\") --\\\\" })',
+    );
+  });
+
+  test("treats a Hyprland 0.57 warning reply as a failed paste", () => {
+    expect(run(["add", "warned paste"])).toBe("1");
+    const { fakeBin, hyprLog, fakeClipboard, versionFile } = fakeHyprland("lua-fail-bin");
+    env.PATH = `${fakeBin}:${process.env.PATH ?? ""}`;
+    writeFileSync(versionFile, HYPRLAND_0570_VERSION);
+
+    env.DITOX_FAKE_SHORTCUT_REPLY = "warning: no window to send the shortcut to";
+    const warned = runResult(["paste", "1", "--target-window", "0xabc"]);
+    expect(warned.exitCode).not.toBe(0);
+    expect(warned.stderr).toContain("PasteBackFailed");
+    expect(readFileSync(fakeClipboard, "utf8")).toBe("warned paste");
+
+    env.DITOX_FAKE_SHORTCUT_REPLY = "error: 3 [string \"return hl.dispatch(bad)\"]:1: syntax error";
+    env.DITOX_FAKE_SHORTCUT_EXIT = "7";
+    const rejected = runResult(["paste", "1", "--target-window", "0xabc"]);
+    expect(rejected.exitCode).not.toBe(0);
+    expect(rejected.stderr).toContain("PasteBackFailed");
+
+    // Focus stays best effort, as with the old syntax: a closed target window
+    // does not stop the shortcut.
+    delete env.DITOX_FAKE_SHORTCUT_REPLY;
+    delete env.DITOX_FAKE_SHORTCUT_EXIT;
+    env.DITOX_FAKE_FOCUS_REPLY = "warning: no window matched address:0xabc";
+    writeFileSync(hyprLog, "");
+    run(["paste", "1", "--target-window", "0xabc"]);
+    expect(hyprLines(hyprLog)).toEqual([
+      "-j version",
+      'dispatch hl.dsp.focus({ window = "address:0xabc" })',
+      'dispatch hl.dsp.send_shortcut({ mods = "CTRL", key = "V" })',
+    ]);
+  });
+
+  test("retries in Lua when the version is unknown but Hyprland parses Lua", () => {
+    expect(run(["add", "retried paste"])).toBe("1");
+    const { fakeBin, hyprLog, versionFile } = fakeHyprland("lua-retry-bin");
+    env.PATH = `${fakeBin}:${process.env.PATH ?? ""}`;
+    env.DITOX_FAKE_LUA_ONLY = "1";
+    writeFileSync(versionFile, "");
+
+    run(["paste", "1", "--target-window", "0xabc"]);
+    expect(hyprLines(hyprLog)).toEqual([
+      "-j version",
+      "dispatch focuswindow address:0xabc",
+      'dispatch hl.dsp.focus({ window = "address:0xabc" })',
+      'dispatch hl.dsp.send_shortcut({ mods = "CTRL", key = "V" })',
+    ]);
+
+    env.DITOX_CONFIG = join(tempDir, "retry-config.toml");
+    writeFileSync(env.DITOX_CONFIG, "[auto_paste]\nenabled = true\nbuffer_ms = 0\n");
+    writeFileSync(hyprLog, "");
+    run(["--auto-paste"]);
+    expect(hyprLines(hyprLog)).toEqual([
+      "-j version",
+      "dispatch sendshortcut CTRL,V,",
+      'dispatch hl.dsp.send_shortcut({ mods = "CTRL", key = "V" })',
+    ]);
+  });
+
   test("does not wait for a wl-copy clipboard owner that keeps stderr open", () => {
     expect(run(["add", "clipboard owner text"])).toBe("1");
 
@@ -914,4 +1014,83 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
     offset += part.length;
   }
   return out;
+}
+
+// Trimmed from real `hyprctl -j version` replies.
+const HYPRLAND_0562_VERSION = JSON.stringify({
+  branch: "v0.56.2-b",
+  commit: "efb50993780079460b0cbed1363e2166a2de1d9f",
+  version: "0.56.2",
+  dirty: false,
+  tag: "v0.56.2",
+  flags: ["nix"],
+});
+const HYPRLAND_0570_VERSION = JSON.stringify({
+  branch: "main",
+  commit: "0aa6745f705f2c4b0a5004eb019ef76e5bbdb426",
+  version: "0.57.0",
+  dirty: false,
+  tag: "v0.57.0",
+  flags: ["nix"],
+});
+
+/**
+ * A fake `hyprctl` that logs its argv, answers `-j version` from a file and
+ * replies to dispatches like Hyprland 0.57 (`ok`, or the reply/exit status in
+ * the DITOX_FAKE_* variables). With DITOX_FAKE_LUA_ONLY a legacy dispatch gets
+ * the Lua parse error and exit status 7, as on a real 0.57.
+ */
+function fakeHyprland(name: string): { fakeBin: string; hyprLog: string; fakeClipboard: string; versionFile: string } {
+  const fakeBin = join(tempDir, name);
+  const hyprLog = join(tempDir, `${name}.log`);
+  const fakeClipboard = join(tempDir, `${name}-clipboard.txt`);
+  const versionFile = join(tempDir, `${name}-version.json`);
+  mkdirSync(fakeBin);
+  writeFileSync(join(fakeBin, "wl-copy"), "#!/usr/bin/env sh\ncat > \"$DITOX_FAKE_CLIPBOARD\"\n");
+  writeFileSync(
+    join(fakeBin, "hyprctl"),
+    [
+      "#!/usr/bin/env sh",
+      "printf '%s\\n' \"$*\" >> \"$DITOX_HYPR_LOG\"",
+      "if [ \"$1\" = \"-j\" ] && [ \"$2\" = \"version\" ]; then",
+      "  cat \"$DITOX_FAKE_HYPR_VERSION\"",
+      "  exit 0",
+      "fi",
+      "if [ \"$1\" = \"dispatch\" ]; then",
+      "  case \"$2\" in",
+      "    hl.dsp.focus*) printf '%s\\n' \"${DITOX_FAKE_FOCUS_REPLY:-ok}\"; exit \"${DITOX_FAKE_FOCUS_EXIT:-0}\" ;;",
+      "    hl.dsp.send_shortcut*) printf '%s\\n' \"${DITOX_FAKE_SHORTCUT_REPLY:-ok}\"; exit \"${DITOX_FAKE_SHORTCUT_EXIT:-0}\" ;;",
+      "  esac",
+      "  if [ -n \"$DITOX_FAKE_LUA_ONLY\" ]; then",
+      "    printf 'error: 3 [string \"return hl.dispatch(%s %s)\"]:1: syntax error\\n' \"$2\" \"$3\"",
+      "    exit 7",
+      "  fi",
+      "  printf 'ok\\n'",
+      "fi",
+      "exit 0",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(join(fakeBin, "wl-copy"), 0o755);
+  chmodSync(join(fakeBin, "hyprctl"), 0o755);
+  writeFileSync(hyprLog, "");
+  delete env.DITOX_CLIPBOARD_MOCK;
+  env.DITOX_FAKE_CLIPBOARD = fakeClipboard;
+  env.DITOX_HYPR_LOG = hyprLog;
+  env.DITOX_FAKE_HYPR_VERSION = versionFile;
+  return { fakeBin, hyprLog, fakeClipboard, versionFile };
+}
+
+function hyprLines(path: string): string[] {
+  return readFileSync(path, "utf8").split("\n").filter((line) => line.length > 0);
+}
+
+function runResult(args: string[]): { exitCode: number | null; stdout: string; stderr: string } {
+  const proc = Bun.spawnSync({
+    cmd: [ditox, ...args],
+    env: { ...process.env, ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return { exitCode: proc.exitCode, stdout: proc.stdout?.toString() ?? "", stderr: proc.stderr?.toString() ?? "" };
 }

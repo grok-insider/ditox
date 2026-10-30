@@ -290,7 +290,10 @@ variants) launch the picker with `DITOX_TUI_REFRESH_MS=250` for live polling.
 
 Paste-back writes the selected entry with `wl-copy`, refocuses the captured
 window with `hyprctl`, and dispatches the configured paste shortcut (`ctrl+v` by
-default).
+default). Each paste reads `hyprctl -j version`: Hyprland 0.57 and later get the
+Lua dispatchers (`hl.dsp.focus`, `hl.dsp.send_shortcut`), older releases get
+`focuswindow` and `sendshortcut`. If the version cannot be read, Ditox sends the
+old syntax and retries in Lua when Hyprland answers with a Lua parse error.
 
 The watcher is the `ditoxd daemon`: a single long-lived DB-owner process running
 the full capture loop. This is the structural fix for DB-lock / stale-watcher

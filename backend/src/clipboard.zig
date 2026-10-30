@@ -262,37 +262,168 @@ fn writeBytesToClipboard(allocator: std.mem.Allocator, init: std.process.Init, b
     return error.ClipboardWriteFailed;
 }
 
+/// How `hyprctl dispatch` wants its argument. Hyprland 0.57 evaluates it as a
+/// Lua expression (`hl.dsp.*`); older releases take the dispatcher name and
+/// its comma-separated arguments.
+pub const DispatchSyntax = enum { legacy, lua };
+
+const DispatchOutcome = enum {
+    ok,
+    failed,
+    /// A legacy request that the compositor parsed as Lua and rejected.
+    needs_lua,
+};
+
+const dispatch_reply_limit = 64 * 1024;
+
 pub fn sendPasteShortcut(allocator: std.mem.Allocator, init: std.process.Init, target_window: ?[]const u8, buffer_ms: u32, keybind: []const u8) !void {
+    const shortcut = try parsePasteShortcut(allocator, keybind);
+    defer shortcut.deinit(allocator);
+
+    // Asked on every paste: ditoxd outlives a Hyprland upgrade and relogin, and
+    // one `hyprctl -j version` costs a few milliseconds next to `buffer_ms`.
+    var syntax = detectDispatchSyntax(allocator, init);
+
     try std.Io.sleep(init.io, std.Io.Duration.fromMilliseconds(buffer_ms), .awake);
 
     if (target_window) |address| {
-        const focus_arg = try std.fmt.allocPrint(allocator, "address:{s}", .{address});
-        defer allocator.free(focus_arg);
-        _ = std.process.run(allocator, init.io, .{
-            .argv = &.{ "hyprctl", "dispatch", "focuswindow", focus_arg },
-            .stdout_limit = .limited(4096),
-            .stderr_limit = .limited(4096),
-        }) catch {};
+        // Best effort, as before: if the window is gone the shortcut still
+        // goes to whatever has focus.
+        const focused = focusWindow(allocator, init, syntax, address) catch .failed;
+        if (focused == .needs_lua) {
+            syntax = .lua;
+            _ = focusWindow(allocator, init, .lua, address) catch .failed;
+        }
     }
 
-    const shortcut = try hyprlandShortcut(allocator, keybind);
-    defer allocator.free(shortcut);
-    const paste = try std.process.run(allocator, init.io, .{
-        .argv = &.{ "hyprctl", "dispatch", "sendshortcut", shortcut },
-        .stdout_limit = .limited(4096),
-        .stderr_limit = .limited(4096),
-    });
-    defer allocator.free(paste.stdout);
-    defer allocator.free(paste.stderr);
-
-    switch (paste.term) {
-        .exited => |code| if (code == 0) return,
-        else => {},
-    }
-    return error.PasteBackFailed;
+    var outcome = try sendShortcut(allocator, init, syntax, shortcut);
+    if (outcome == .needs_lua) outcome = try sendShortcut(allocator, init, .lua, shortcut);
+    if (outcome != .ok) return error.PasteBackFailed;
 }
 
-fn hyprlandShortcut(allocator: std.mem.Allocator, keybind: []const u8) ![]u8 {
+/// Any failure to ask (no hyprctl, no compositor, an unreadable reply) keeps
+/// the legacy syntax; a Lua compositor then rejects it with a parse error and
+/// the paste retries in Lua.
+pub fn detectDispatchSyntax(allocator: std.mem.Allocator, init: std.process.Init) DispatchSyntax {
+    const result = std.process.run(allocator, init.io, .{
+        .argv = &.{ "hyprctl", "-j", "version" },
+        .stdout_limit = .limited(dispatch_reply_limit),
+        .stderr_limit = .limited(4096),
+    }) catch return .legacy;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code != 0) return .legacy,
+        else => return .legacy,
+    }
+    return syntaxFromVersionReply(allocator, result.stdout);
+}
+
+fn syntaxFromVersionReply(allocator: std.mem.Allocator, reply: []const u8) DispatchSyntax {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, reply, .{}) catch return .legacy;
+    defer parsed.deinit();
+    if (parsed.value != .object) return .legacy;
+    const version = parsed.value.object.get("version") orelse return .legacy;
+    if (version != .string) return .legacy;
+    return syntaxForVersion(version.string);
+}
+
+fn syntaxForVersion(version: []const u8) DispatchSyntax {
+    var rest = std.mem.trim(u8, version, " \t\r\n");
+    if (rest.len > 0 and (rest[0] == 'v' or rest[0] == 'V')) rest = rest[1..];
+    var parts = std.mem.splitScalar(u8, rest, '.');
+    const major = parseLeadingNumber(parts.next() orelse return .legacy) orelse return .legacy;
+    const minor = parseLeadingNumber(parts.next() orelse return .legacy) orelse return .legacy;
+    if (major > 0 or minor >= 57) return .lua;
+    return .legacy;
+}
+
+fn parseLeadingNumber(text: []const u8) ?u32 {
+    var end: usize = 0;
+    while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
+    if (end == 0) return null;
+    return std.fmt.parseInt(u32, text[0..end], 10) catch null;
+}
+
+fn focusWindow(allocator: std.mem.Allocator, init: std.process.Init, syntax: DispatchSyntax, address: []const u8) !DispatchOutcome {
+    switch (syntax) {
+        .legacy => {
+            const arg = try std.fmt.allocPrint(allocator, "address:{s}", .{address});
+            defer allocator.free(arg);
+            return runDispatch(allocator, init, .legacy, &.{ "hyprctl", "dispatch", "focuswindow", arg });
+        },
+        .lua => {
+            const expr = try luaFocusExpr(allocator, address);
+            defer allocator.free(expr);
+            return runDispatch(allocator, init, .lua, &.{ "hyprctl", "dispatch", expr });
+        },
+    }
+}
+
+fn sendShortcut(allocator: std.mem.Allocator, init: std.process.Init, syntax: DispatchSyntax, shortcut: PasteShortcut) !DispatchOutcome {
+    switch (syntax) {
+        .legacy => {
+            const arg = try legacyShortcutArg(allocator, shortcut);
+            defer allocator.free(arg);
+            return runDispatch(allocator, init, .legacy, &.{ "hyprctl", "dispatch", "sendshortcut", arg });
+        },
+        .lua => {
+            const expr = try luaShortcutExpr(allocator, shortcut);
+            defer allocator.free(expr);
+            return runDispatch(allocator, init, .lua, &.{ "hyprctl", "dispatch", expr });
+        },
+    }
+}
+
+fn runDispatch(allocator: std.mem.Allocator, init: std.process.Init, syntax: DispatchSyntax, argv: []const []const u8) !DispatchOutcome {
+    const result = try std.process.run(allocator, init.io, .{
+        .argv = argv,
+        .stdout_limit = .limited(dispatch_reply_limit),
+        .stderr_limit = .limited(dispatch_reply_limit),
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    return classifyDispatch(syntax, result.term, result.stdout, result.stderr);
+}
+
+/// Legacy requests keep their old rule (exit status 0). A Lua dispatcher that
+/// runs but fails still exits 0 with a `warning: ...` reply, so the Lua path
+/// only counts the exact reply `ok`.
+fn classifyDispatch(syntax: DispatchSyntax, term: std.process.Child.Term, stdout: []const u8, stderr: []const u8) DispatchOutcome {
+    const code = switch (term) {
+        .exited => |value| value,
+        else => return .failed,
+    };
+    switch (syntax) {
+        .legacy => {
+            if (isLuaParseError(stdout) or isLuaParseError(stderr)) return .needs_lua;
+            return if (code == 0) .ok else .failed;
+        },
+        .lua => {
+            if (code == 0 and std.mem.eql(u8, std.mem.trim(u8, stdout, " \t\r\n"), "ok")) return .ok;
+            return .failed;
+        },
+    }
+}
+
+/// Hyprland 0.57 wraps the request in `return hl.dispatch(...)`; a legacy
+/// dispatcher string fails to parse and the error names that chunk.
+fn isLuaParseError(reply: []const u8) bool {
+    return std.mem.indexOf(u8, reply, "[string \"return hl.dispatch(") != null;
+}
+
+const PasteShortcut = struct {
+    /// Hyprland modifier names separated by spaces, e.g. "CTRL SHIFT"; may be empty.
+    mods: []const u8,
+    key: []const u8,
+
+    fn deinit(self: PasteShortcut, allocator: std.mem.Allocator) void {
+        allocator.free(self.mods);
+        allocator.free(self.key);
+    }
+};
+
+fn parsePasteShortcut(allocator: std.mem.Allocator, keybind: []const u8) !PasteShortcut {
     const lower = try std.ascii.allocLowerString(allocator, std.mem.trim(u8, keybind, " \t\r\n"));
     defer allocator.free(lower);
     if (lower.len == 0) return error.InvalidPasteKeybind;
@@ -300,6 +431,7 @@ fn hyprlandShortcut(allocator: std.mem.Allocator, keybind: []const u8) ![]u8 {
     var mods: std.ArrayList([]const u8) = .empty;
     defer mods.deinit(allocator);
     var main_key: ?[]const u8 = null;
+    errdefer if (main_key) |key| allocator.free(key);
 
     var parts = std.mem.splitScalar(u8, lower, '+');
     while (parts.next()) |raw_part| {
@@ -314,16 +446,48 @@ fn hyprlandShortcut(allocator: std.mem.Allocator, keybind: []const u8) ![]u8 {
     }
 
     const key = main_key orelse return error.InvalidPasteKeybind;
-    defer allocator.free(key);
+    const mods_text = try std.mem.join(allocator, " ", mods.items);
+    return .{ .mods = mods_text, .key = key };
+}
 
+/// `sendshortcut` argument for Hyprland before 0.57: "MODS,KEY," (an empty
+/// window target means the focused window).
+fn legacyShortcutArg(allocator: std.mem.Allocator, shortcut: PasteShortcut) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s},{s},", .{ shortcut.mods, shortcut.key });
+}
+
+/// Hyprland 0.57+: `hl.dsp.focus({ window = "address:0x..." })`.
+fn luaFocusExpr(allocator: std.mem.Allocator, address: []const u8) ![]u8 {
     var out = std.Io.Writer.Allocating.init(allocator);
     errdefer out.deinit();
-    for (mods.items, 0..) |modifier, index| {
-        if (index > 0) try out.writer.writeByte(' ');
-        try out.writer.writeAll(modifier);
-    }
-    try out.writer.print(",{s},", .{key});
+    try out.writer.writeAll("hl.dsp.focus({ window = \"address:");
+    try writeLuaStringBody(&out.writer, address);
+    try out.writer.writeAll("\" })");
     return out.toOwnedSlice();
+}
+
+/// Hyprland 0.57+: `hl.dsp.send_shortcut({ mods = "CTRL", key = "V" })`. No
+/// `window` field, like the legacy empty target: the focused window gets it.
+fn luaShortcutExpr(allocator: std.mem.Allocator, shortcut: PasteShortcut) ![]u8 {
+    var out = std.Io.Writer.Allocating.init(allocator);
+    errdefer out.deinit();
+    try out.writer.writeAll("hl.dsp.send_shortcut({ mods = \"");
+    try writeLuaStringBody(&out.writer, shortcut.mods);
+    try out.writer.writeAll("\", key = \"");
+    try writeLuaStringBody(&out.writer, shortcut.key);
+    try out.writer.writeAll("\" })");
+    return out.toOwnedSlice();
+}
+
+/// Contents of a double-quoted Lua string. The window address and the key come
+/// from the command line and config, so nothing in them may end the string.
+fn writeLuaStringBody(writer: *std.Io.Writer, bytes: []const u8) !void {
+    for (bytes) |byte| switch (byte) {
+        '\\' => try writer.writeAll("\\\\"),
+        '"' => try writer.writeAll("\\\""),
+        0...0x1f, 0x7f => try writer.print("\\{d:0>3}", .{byte}),
+        else => try writer.writeByte(byte),
+    };
 }
 
 fn pasteModifier(part: []const u8) ?[]const u8 {
@@ -425,4 +589,85 @@ test "classifyPasteFailure separates an empty clipboard from a refused type" {
     try std.testing.expectEqual(.type_unavailable, classifyPasteFailure("Clipboard content is not available as requested type \"image/png\"\n"));
     try std.testing.expectEqual(.failed, classifyPasteFailure("The compositor does not seem to implement zwlr_data_control_manager_v1\n"));
     try std.testing.expectEqual(.failed, classifyPasteFailure(""));
+}
+
+test "dispatch syntax follows the Hyprland version" {
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxForVersion("0.56.2"));
+    try std.testing.expectEqual(DispatchSyntax.lua, syntaxForVersion("0.57.0"));
+    try std.testing.expectEqual(DispatchSyntax.lua, syntaxForVersion("v0.57.1"));
+    try std.testing.expectEqual(DispatchSyntax.lua, syntaxForVersion("0.58.0-dev"));
+    try std.testing.expectEqual(DispatchSyntax.lua, syntaxForVersion("1.0.0"));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxForVersion("0.41"));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxForVersion("0"));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxForVersion(""));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxForVersion("unknown"));
+}
+
+test "an unreadable version reply keeps the legacy syntax" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(DispatchSyntax.lua, syntaxFromVersionReply(allocator, "{\"branch\":\"main\",\"version\":\"0.57.0\",\"tag\":\"v0.57.0\"}"));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxFromVersionReply(allocator, "{\"version\":\"0.56.2\"}"));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxFromVersionReply(allocator, ""));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxFromVersionReply(allocator, "Hyprland 0.57.0 built from branch main"));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxFromVersionReply(allocator, "[\"0.57.0\"]"));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxFromVersionReply(allocator, "{\"version\":57}"));
+    try std.testing.expectEqual(DispatchSyntax.legacy, syntaxFromVersionReply(allocator, "{}"));
+}
+
+test "paste shortcuts render in both dispatch syntaxes" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { keybind: []const u8, legacy: []const u8, lua: []const u8 }{
+        .{ .keybind = "ctrl+v", .legacy = "CTRL,V,", .lua = "hl.dsp.send_shortcut({ mods = \"CTRL\", key = \"V\" })" },
+        .{ .keybind = " Ctrl + Shift + v ", .legacy = "CTRL SHIFT,V,", .lua = "hl.dsp.send_shortcut({ mods = \"CTRL SHIFT\", key = \"V\" })" },
+        .{ .keybind = "super+alt+space", .legacy = "SUPER ALT,SPACE,", .lua = "hl.dsp.send_shortcut({ mods = \"SUPER ALT\", key = \"SPACE\" })" },
+        .{ .keybind = "insert", .legacy = ",INSERT,", .lua = "hl.dsp.send_shortcut({ mods = \"\", key = \"INSERT\" })" },
+        .{ .keybind = "ctrl+\"", .legacy = "CTRL,\",", .lua = "hl.dsp.send_shortcut({ mods = \"CTRL\", key = \"\\\"\" })" },
+        .{ .keybind = "ctrl+\\", .legacy = "CTRL,\\,", .lua = "hl.dsp.send_shortcut({ mods = \"CTRL\", key = \"\\\\\" })" },
+    };
+    for (cases) |case| {
+        const shortcut = try parsePasteShortcut(allocator, case.keybind);
+        defer shortcut.deinit(allocator);
+        const legacy = try legacyShortcutArg(allocator, shortcut);
+        defer allocator.free(legacy);
+        try std.testing.expectEqualStrings(case.legacy, legacy);
+        const lua = try luaShortcutExpr(allocator, shortcut);
+        defer allocator.free(lua);
+        try std.testing.expectEqualStrings(case.lua, lua);
+    }
+}
+
+test "invalid paste keybinds are refused without leaking" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidPasteKeybind, parsePasteShortcut(allocator, ""));
+    try std.testing.expectError(error.InvalidPasteKeybind, parsePasteShortcut(allocator, "ctrl+shift"));
+    try std.testing.expectError(error.InvalidPasteKeybind, parsePasteShortcut(allocator, "ctrl+v+x"));
+    try std.testing.expectError(error.InvalidPasteKeybind, parsePasteShortcut(allocator, "v+"));
+}
+
+test "the focus target cannot end the Lua string" {
+    const allocator = std.testing.allocator;
+    const plain = try luaFocusExpr(allocator, "0x568e7a8e23f0");
+    defer allocator.free(plain);
+    try std.testing.expectEqualStrings("hl.dsp.focus({ window = \"address:0x568e7a8e23f0\" })", plain);
+
+    const hostile = try luaFocusExpr(allocator, "0xabc\" }) hl.dsp.exit() --\\\n\x7f");
+    defer allocator.free(hostile);
+    try std.testing.expectEqualStrings("hl.dsp.focus({ window = \"address:0xabc\\\" }) hl.dsp.exit() --\\\\\\010\\127\" })", hostile);
+}
+
+test "a Lua dispatch only succeeds on the exact reply ok" {
+    try std.testing.expectEqual(DispatchOutcome.ok, classifyDispatch(.lua, .{ .exited = 0 }, "ok\n", ""));
+    try std.testing.expectEqual(DispatchOutcome.failed, classifyDispatch(.lua, .{ .exited = 0 }, "warning: window not found\n", ""));
+    try std.testing.expectEqual(DispatchOutcome.failed, classifyDispatch(.lua, .{ .exited = 0 }, "", ""));
+    try std.testing.expectEqual(DispatchOutcome.failed, classifyDispatch(.lua, .{ .exited = 7 }, "ok", ""));
+    try std.testing.expectEqual(DispatchOutcome.failed, classifyDispatch(.lua, .{ .signal = .KILL }, "ok", ""));
+}
+
+test "a legacy dispatch keeps the exit status rule and spots a Lua compositor" {
+    try std.testing.expectEqual(DispatchOutcome.ok, classifyDispatch(.legacy, .{ .exited = 0 }, "ok\n", ""));
+    try std.testing.expectEqual(DispatchOutcome.ok, classifyDispatch(.legacy, .{ .exited = 0 }, "", ""));
+    try std.testing.expectEqual(DispatchOutcome.failed, classifyDispatch(.legacy, .{ .exited = 1 }, "", ""));
+    const parse_error = "error: 3 [string \"return hl.dispatch(sendshortcut CTRL,V,)\"]:1: ')' expected near 'CTRL'\n";
+    try std.testing.expectEqual(DispatchOutcome.needs_lua, classifyDispatch(.legacy, .{ .exited = 7 }, parse_error, ""));
+    try std.testing.expectEqual(DispatchOutcome.needs_lua, classifyDispatch(.legacy, .{ .exited = 7 }, "", parse_error));
 }

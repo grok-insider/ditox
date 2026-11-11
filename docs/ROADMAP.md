@@ -1,43 +1,31 @@
-# Ditox Roadmap & Docs Index
+# Ditox
 
-Status: terminal-first clipboard manager (Zig backend + OpenTUI/Bun frontend).
-See `AGENTS.md` (repo root) for the authoritative architecture overview.
+Clipboard manager in Rust: the `ditoxd` daemon and the `ditox` window (Rune).
 
-## Documents
+## Shipped
 
-| File | Purpose |
-|------|---------|
-| [`TODO.md`](./TODO.md) | Active worklist — what remains after the OpenTUI + Zig scaffold. |
-| [`AGENTS.md`](../AGENTS.md) | Authoritative architecture overview. |
+- SQLite history (schema 5), FTS and fuzzy search, content-addressed images, watcher, Hyprland paste-back (0.57 Lua dispatch and earlier).
+- JSON-RPC on `$XDG_RUNTIME_DIR/ditox/rpc.sock`, with shared types in `ditox-rpc`.
+- Window in the Fabrials style: search with its finds marked, text/image/pin filters, day headings, rows that show a link or a colour, preview, paste, paste as text, copy only, open a link, pin, delete with undo, a sheet of every key, pause and resume, daemon-down state, light and dark.
+- Paste into a terminal with its own shortcut. Hyprland is asked through its socket.
 
-## Current Scope (shipped)
+## Memory and speed
 
-- SQLite schema/migrations, FTS5 search (literal + fuzzy fallback).
-- Image capture with magic-byte MIME verification, content-addressed image
-  blobs (atomic writes, liveness-checked prune queue, orphan-blob GC in
-  repair).
-- `entries.get_image` RPC: the TUI fetches preview bytes over RPC and never
-  reads blob files from disk.
-- Native Kitty/Sixel protocol image rendering (capability-gated, placement
-  diffed) with OpenTUI-supersampled / text half-block fallbacks.
-- Method-specific JSON-RPC contracts over Content-Length stdio; the TUI keeps
-  one persistent `ditoxd serve --stdio` session per process.
-- `ditoxd daemon` watcher (single long-lived DB owner, capture errors logged +
-  surfaced via `watcher.status.last_error`) + Hyprland paste-back.
-- File-backed OpenTUI customization, configurable keymap, multi-select,
-  pinned-only view, full preview (soft-wrapped, arrow-key toggle), mouse
-  selection, live polling.
-- Recency-ordered history: copy/paste records `last_used_at_ms` so re-used
-  clips move to the top; row age reflects most-recent activity.
-- Short/compatibility CLI aliases and config aliases for easy migration.
+Measured on the station (NVIDIA, Hyprland 0.57.1, driver 620.70) with a copy of a real history of 1000 clips, in a headless compositor that renders on the same GPU. Resident memory of the window:
 
-## Deferred (intentionally not built yet)
+| | Before | Now |
+|---|---|---|
+| Open, a text clip selected | 150 MB | 112 MB |
+| Open, a 4K screenshot selected | 195 MB | 118 MB |
+| After looking at 25 images | 210 MB | 123 MB |
+| After looking at 14 screenshots, 1080p to 4K | 366 MB | 135 MB |
 
-- Compile-time dispatch ↔ schema enforcement for RPC methods (sync is manual).
-- Daemon sockets / event stream (RPC is stdio-only, one session per client).
-- LAN sync, scripting, Windows, X11, macOS.
+About 80 MB of what is left is the NVIDIA driver's libraries, which every program that draws with the GPU maps and shares. The window's own binary is about 23 MB of it, and what it allocates about 20 MB at open.
+
+- First frame of a headless run: 0.13 s before, 0.11 s now. The window also no longer starts `hyprctl` before it opens (20 to 50 ms); the socket answers in 0.1 ms.
+- A paste asked Hyprland three times through `hyprctl`; it now asks four times through the socket, in under a millisecond together.
+- Under a compositor that renders in software the first try fails and the window starts again with every driver: about 230 MB, as before.
 
 ## Distribution
 
-- Nix flake; CI builds `x86_64-linux` + `aarch64-linux` and pushes to
-  `https://cache.fabrials.com/fabrials`. See `README.md` → Install.
+Nix flake. CI builds `x86_64-linux` and `aarch64-linux` and pushes to `https://cache.fabrials.com/fabrials`.

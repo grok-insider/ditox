@@ -1,295 +1,139 @@
 # AGENTS.md
 
-Guidance for AI coding agents (and humans) working in this repository.
+Guidance for AI coding agents working in this repository.
 
-> This file is the source of truth for the project's architecture. Keep it in
-> sync with the code. For active and deferred work, see `docs/ROADMAP.md` and
-> `docs/TODO.md`; do not treat their "planned" sections as current behavior.
+> This file is the source of truth for the architecture. Keep it in sync with
+> the code. `docs/ROADMAP.md` is status, not a second design.
 
-## What Ditox Is
+## What Ditox is
 
-Ditox is a **terminal-first clipboard manager** for Linux/Wayland (first target:
-Hyprland). The desktop window is a separate Tauri client. The stack is:
+A clipboard manager for Linux/Wayland, in Rust. One Cargo workspace, two binaries:
 
-- **Backend — Zig** (`backend/`): owns clipboard access, SQLite storage, image
-  blobs, the watcher daemon, config, paste-back, and repair. Builds two
-  binaries: `ditox` (CLI + launcher) and `ditoxd` (daemon + JSON-RPC server).
-- **Frontend — Bun + TypeScript + OpenTUI/Solid** (`tui/`): owns rendering and
-  keyboard workflow only. Bundled to `tui/dist/index.js`.
-- **Window — Tauri 2 + React 19** (`gui/`): another JSON-RPC client of the
-  daemon socket. It uses one long-lived connection, vendored `@fabrials/ui`,
-  and does not open SQLite. A missing socket is daemon-down; the window does
-  not spawn a second daemon.
-- **IPC**: JSON-RPC 2.0 over Content-Length framing. The TUI prefers
-  `$XDG_RUNTIME_DIR/ditox/rpc.sock` and can fall back to one long-lived
-  `ditoxd serve --stdio` session. The window uses only the socket. The
-  clients never open the database directly.
+- **`ditoxd`** (`crates/ditoxd`): clipboard, SQLite, image files, watcher, config, paste-back, JSON-RPC.
+- **`ditox`** (`crates/ditox`, Rune): the only interface. It is a window. It does not open SQLite.
+- **`ditox-rpc`** (`crates/ditox-rpc`): the wire types, the framing and the client. Both binaries use it, so a change to a type breaks the build on both sides.
 
 ```text
-┌──────────────────────────────┐     JSON-RPC 2.0 (Content-Length stdio)
-│  tui/  (Bun + OpenTUI/Solid)  │◀───────────────┐
-│  rendering + keymap only      │                │
-└──────────────────────────────┘                │
-                                      ┌──────────┴───────────┐
-  ditox / ditoxd  (Zig)              │  backend/  (Zig)      │
-  CLI · launcher · daemon  ─────────▶│  storage · clipboard  │
-                                      │  watcher · rpc · cfg  │
-                                      └──────────┬───────────┘
-                                                 │
-                                     SQLite + content-addressed image blobs
-                                     ~/.local/share/ditox/
+ditox (Rune window)  --JSON-RPC-->  ditoxd (daemon)
+                                      storage · clipboard · watcher
+                                      SQLite + image files
 ```
 
-## Build, Test, Run
+The socket is `$XDG_RUNTIME_DIR/ditox/rpc.sock` (Content-Length framed JSON-RPC 2.0, mode 0600).
 
-The repo root has a `package.json` that orchestrates both halves; most commands
-shell out through `nix develop` so the Zig/Bun/SQLite toolchain is pinned.
+## Build and test
 
 ```bash
-# Dev shell (Zig 0.16, Bun, SQLite, wl-clipboard, hyprland, bun2nix)
 nix develop
-
-# Build both halves (TUI bundle, then Zig binaries into ./zig-out)
-bun run build           # = build:tui (bun build.ts) + build:backend (zig build)
-
-# Full check: backend tests, builds, CLI smoke, TUI typecheck + tests
-bun run check
-
-# Targeted
-bun run test:backend    # nix develop -c zig build test
-bun run test:cli        # bun test tests/
-bun run --cwd tui test  # TUI unit + golden tests
-bun run --cwd tui typecheck
-bun run --cwd gui typecheck   # window: tsc --noEmit (needs `bun install` in gui/ first)
-bun run --cwd gui test        # window: unit tests
-
-# Run
-./zig-out/bin/ditox add "hello"     # CLI
-./zig-out/bin/ditox list --json
-./zig-out/bin/ditox                  # launch the TUI
-./zig-out/bin/ditoxd daemon          # clipboard watcher daemon
+cargo test --workspace
+cargo clippy --workspace --all-targets
 ```
 
-### Nix / packaging
+`nix build` builds the workspace, runs its tests, and ships `bin/ditox` and `bin/ditoxd` together. Home Manager starts `ditoxd daemon`.
+
+Headless UI check (needs Vulkan):
 
 ```bash
-nix build                 # hermetic build of the whole package (see flake.nix)
-nix run                   # build + run ditox
+cargo run -p ditox -- --snap /tmp/ditox.png --scene ready
+cargo run -p ditox -- --list-scenes
 ```
 
-The Nix build is **fully hermetic** and does not depend on a pre-existing
-`tui/node_modules` or `tui/dist`:
+Scenes are fixtures in `crates/ditox/src/fixture.rs`. They do not talk to a daemon. Look at the picture after a visible change, in `ready` and `light` at least.
 
-1. `bun2nix` turns `tui/bun.lock` into `tui/bun.nix` (a set of content-addressed
-   fetches). The flake consumes it via `bun2nix.fetchBunDeps`.
-2. The build installs `node_modules` into `tui/` from that offline cache, runs
-   `bun run build` to produce `tui/dist`, then `zig build` to produce the
-   binaries and install the TUI assets under `share/ditox/tui/`.
-3. The matching `@opentui` modules (including the native `libopentui.so`) are
-   vendored into `share/ditox/tui/node_modules/@opentui` so the installed CLI's
-   `bun --no-install --cwd share/ditox/tui ./dist/index.js` resolves its FFI
-   lib from the store, never the user's bun cache.
+The window tests (`crates/ditox/src/tests.rs`) run the real view in Rune's headless `Runtime`, with no GPU. Feed events reach them through `step`, the window's own turn, and `feed::take_sent()` returns what the window asked the daemon for. `crates/ditox/src/feed/tests.rs` runs the feed against a real daemon in the same process, with a file for a clipboard.
 
-**If you change TUI dependencies**, regenerate the lock-to-nix file:
-
-```bash
-cd tui && bun install        # update bun.lock
-cd tui && bun2nix -o bun.nix # regenerate bun.nix (bun2nix is in the dev shell)
-```
-
-Commit both `tui/bun.lock` and `tui/bun.nix`.
-
-The desktop window is a separate package, `ditox-gui`. It is not a dependency
-of `ditoxd` or the user service, but it is a flake check on x86_64-linux only
-(`checks.x86_64-linux.gui`): CI builds it, so a broken `gui/bun.nix` or
-`gui/src-tauri/Cargo.lock` cannot merge green, and the CI cache push includes
-its closure next to the TUI's. After changing `gui/package.json`, regenerate
-its lock and Nix deps from the repo root:
-
-```bash
-cd gui && bun install
-cd .. && nix develop -c bun2nix -l gui/bun.lock -o gui/bun.nix
-```
-
-Commit `gui/bun.lock` and `gui/bun.nix`.
-
-## Workspace Layout
+## Layout
 
 ```text
-backend/            Zig backend (ditox + ditoxd)
-  build.zig.zon     Zig package manifest (no external deps; links system sqlite3)
-  src/*.zig         see module map below
-build.zig           Root build: builds both binaries + installs TUI assets
-tui/                Bun + OpenTUI/Solid frontend
-gui/                Tauri 2 + React window (socket client only)
-  build.ts          Bun.build bundler entry (-> dist/index.js)
-  bun.lock          Bun lockfile (source of truth for deps)
-  bun.nix           Generated by bun2nix from bun.lock (committed, hermetic Nix)
-  src/              TUI source (see module map below)
-contracts/          JSON-RPC schema + fixtures (rpc.schema.json, *.rpc)
-tests/              CLI smoke tests (bun test, via assert-style spawning)
-docs/               ROADMAP, TODO, and design notes
-flake.nix           Hermetic package, devShell, apps, homeManagerModules
-.github/workflows/  CI: dual-arch nix build + push to cache.fabrials.com
+crates/ditox-rpc/   types.rs, frame.rs, client.rs, hypr.rs (Hyprland's request socket)
+crates/ditoxd/      the daemon
+crates/ditox/       the window
+docs/               ROADMAP, TODO
+flake.nix           package, devShell, homeManagerModules
 ```
 
-### Backend modules (`backend/src/`)
+### Daemon
 
 | Module | Purpose |
 |--------|---------|
-| `cli.zig` | `ditox` CLI: arg parsing, alias table, TUI launch/paste-back |
-| `daemon.zig` | `ditoxd`: watcher daemon + framed JSON-RPC `serve --stdio` loop |
-| `rpc.zig` | JSON-RPC 2.0 envelope, method routing, Content-Length framing |
-| `storage.zig` | SQLite schema/migrations, entry CRUD, FTS search, prune queue |
-| `blob.zig` | Content-addressed blob filesystem (atomic write, delete, exists) |
-| `fuzzy.zig` | Fuzzy-search scoring engine (registered as a SQLite UDF) |
-| `clipboard.zig` | Wayland clipboard read/write (wl-clipboard) |
-| `config.zig` | TOML/JSON config loading + compatibility aliases |
-| `models.zig` | Entry / RPC data model |
-| `app.zig` | Shared app wiring |
-| `util.zig` | Helpers incl. `detectImageMime` (capture-format source of truth) |
-| `root.zig` | Library module root (`ditox_core`) + test aggregation |
+| `main.rs` | `daemon`, `ingest wake`, `ingest text`, `ingest image` |
+| `server.rs` | Socket, one thread per client, the single loop that owns the store, the `wl-paste --watch` child |
+| `rpc.rs` | Method table and parameter checks |
+| `app.rs` | Capture, paste, copy; the `Desktop` trait |
+| `storage.rs` | SQLite, FTS, retention, prune queue, migrations |
+| `blob.rs` | Content-addressed image files |
+| `clipboard.rs` | `wl-paste` and `wl-copy`, or a file with `DITOX_CLIPBOARD_MOCK` |
+| `hyprland.rs` | Active window, the class of a window, and the paste shortcut: 0.57 Lua dispatch and the earlier syntax, over Hyprland's socket or `hyprctl` |
+| `policy.rs` | What may be stored or pasted. Pure. |
+| `config.rs` | TOML and JSON config |
+| `fuzzy.rs` | The `ditox_fuzzy_score` SQLite function |
+| `text.rs`, `image.rs` | Sanitising, hashing, MIME sniffing, image size |
+| `process.rs` | Child processes with a timeout and an output cap |
 
-### Frontend modules (`tui/src/`)
+Every request runs on one thread, in order. A `clipboard.wake` asks for a capture; the capture runs 40 ms after the last wake and at most 250 ms after the first. The search calls `ditox_fuzzy_score` several times per row with the same arguments; the function remembers its last two answers.
 
-| Path | Purpose |
-|------|---------|
-| `index.tsx` | TUI entry point |
-| `App.tsx` | Root component (initial state preload, wiring, render options) |
-| `keymap.ts` | `useDitoxKeymap` + key normalization/chord handling |
-| `layout.ts` | Single source for preview width/row math (App + components) |
-| `terminal-lifecycle.ts` | Exit reset sequence, shutdown, exit-after-action |
-| `rpc.ts` | Persistent JSON-RPC client (one framed `ditoxd serve` session) |
-| `state.ts` | UI state machine (selection, search, filters, multi-select) |
-| `presentation.ts` | Row/preview formatting |
-| `theme.ts`, `ui-config.ts` | Theme palettes + layout knob types |
-| `tui-config.ts` | Facade over `config/{types,resolve,style,format}.ts` |
-| `image-preview.ts` | Image decode + half-block rendering (bounded LRU caches) |
-| `use-image-block-preview.ts` | Shared Solid hook: decode effect w/ semantic request equality |
-| `terminal-image.ts` | Native Kitty/Sixel placement (placement-diffed, flicker-free) |
-| `components/` | Shell, EntryList, PreviewPane, HeaderBar, StatusLine, Overlay, … |
-| `components/style-utils.ts`, `components/preview-shared.ts` | Shared component helpers |
-| `generated/rpc-schema.d.ts` | Types generated from `contracts/rpc.schema.json` (committed) |
-| `__goldens__/` | Golden TUI text frames (refresh with `DITOX_UPDATE_GOLDENS=1`) |
+### Window
 
-## Data Locations (Linux)
+| Module | Purpose |
+|--------|---------|
+| `main.rs` | State, key map, `apply` (what a feed event changes), `AppSpec` |
+| `ui.rs` | The view |
+| `theme.rs` | Fabrials tokens: palette, type scale, radii, icons, embedded IBM Plex |
+| `model.rs` | Pure helpers: titles, ages, list rows and their headings, what a clip is, search marks, selection |
+| `feed.rs` | The background thread that talks to the daemon |
+| `picture.rs` | The thread that decodes a picture and scales it to the preview |
+| `startup.rs` | Before the window: which Vulkan drivers load, how freed memory is returned |
+| `fixture.rs` | Snapshot scenes |
 
-- Database: `~/.local/share/ditox/ditox-v2.db`
-- Image blobs: `~/.local/share/ditox/images-v2/` (content-addressed `hash[..2]/hash.ext`)
-- Config: `~/.config/ditox/config.toml` (TOML or JSON; `DITOX_CONFIG` overrides)
-- TUI config: `~/.config/ditox/tui.json` (`DITOX_TUI_CONFIG` overrides)
+The window polls `history.pulse` every 250 ms and asks for the list again only when the revision moved. Lists are compact (400 characters of text); the selected clip's full text and image come from `entries.get` and `entries.get_image`. The window says which clip it waits for (`Want`); the feed fetches only the last one asked, retries a failure on the next pulse, and reports a clip that is gone or unreadable.
 
-Tests isolate via `XDG_DATA_HOME` / `XDG_CONFIG_HOME` temp dirs.
+A delete is the feed's to carry out. The window takes the row off and sends `Delete`; the feed keeps the id for `UNDO_TIME`, leaves it out of every list that arrives, and deletes it when the time is up or the window closes (`feed::finish`, from `on_close`). `Restore` takes it back.
 
-## Important Patterns
+### Memory
 
-- **UI never touches the DB or the blob store.** All data flows through
-  JSON-RPC to `ditoxd`; image preview bytes arrive via `entries.get_image`.
-  The filesystem byte source in `image-preview.ts` exists only as the default
-  for direct/unit use — production installs the RPC source in `App.run`. Do
-  not add direct filesystem reads to the TUI.
-- **Image-over-text capture priority**: the watcher prefers image formats so
-  "copy image" from a browser stores the image, not the URL. An announced
-  image that cannot be read is retried next poll and is not replaced by the
-  text alternative. An empty clipboard, or an offer that does not serve its
-  announced type, is not a watcher error.
-- **MIME is verified, not trusted**: capture paths sniff magic bytes via
-  `util.detectImageMime`; a sniffable announced type that does not match the
-  bytes is not stored as an image.
-- **Deduplication**: entries are SHA-256 hashed; the watcher checks before insert.
-- **Content sanitization**: display/preview text strips control/ANSI sequences.
-- **Image blobs are content-addressed** with atomic writes (unique tmp +
-  fsync + rename) and a prune queue. Prunes are liveness-checked (`path NOT
-  referenced by entries`) and re-adding an image cancels its pending prune —
-  preserve both invariants when touching delete/clear/retention/repair.
-- **Format names are backend-owned and stable**; the frontend must not invent them.
-- **Machine output is JSON** (`list --json`, RPC); human CLI output is separate.
+Measure before and after a change here; the numbers are in `docs/ROADMAP.md`.
 
-## Code Standards
+- `startup::prepare` runs first in `main`. It sets `VK_LOADER_DRIVERS_SELECT` to the driver of the cards that drive a screen, read from `/sys/class/drm`. Left alone the Vulkan loader opens every installed driver, and Mesa's bring LLVM with them. A card it does not know means no choice. When the window cannot open with the choice, the watchdog starts the program again with every driver.
+- The allocator is told to use two arenas and fixed thresholds, so a decoded picture is handed back when freed.
+- A picture is decoded on its own thread and kept at most 1280 pixels on its long side (2048 at a scale above 1.25): `picture::fit`. The window keeps the last 4, up to 24 MiB. A picture above 256 MiB decoded is described, not drawn.
+- `Client::image` decodes the base64 where it lies in the response, and the frame reader hands over its buffer instead of copying it.
+- The window asks Hyprland for the active window through its socket (`ditox_rpc::hypr`), not `hyprctl`: a process costs tens of milliseconds before the window opens.
 
-Hard-won rules; new code must follow them, and reviews should reject code that
-does not.
+## Design
 
-### Layering
+The window follows Fabrials UI 0.11 (`libs/fabrials-ui/DESIGN.md` in the house workspace): deep Stormwall neutrals, one 12 px plate for the preview, 8 px controls, 6 px tags, the selected row as a tint, a mono label voice for metadata, IBM Plex. Take colours, sizes and radii from `theme.rs`; do not write literals in `ui.rs`. Text on screen is English.
 
-- **No per-call process spawns** in the TUI. RPC goes through the persistent
-  session in `tui/src/rpc.ts`. Never call `Bun.spawnSync` from render code.
-- **Layout math lives in `tui/src/layout.ts`.** App and components must consume
-  it — never re-derive (mirror) another component's width/row math inline.
-- **Component styling helpers live in `components/style-utils.ts`** and
-  preview-shared logic in `components/preview-shared.ts`; do not re-copy
-  `justifyContent`/tone helpers into components.
-- **Theming is token-driven.** Components take colors from `surface(config, name)`
-  + tone routing; never hardcode hex values in components (image background
-  defaults excepted).
-- **Config resolution lives in `tui/src/config/`**; `tui-config.ts` is a
-  re-export facade. Add new knobs in `config/types.ts` (+ defaults) and
-  `config/resolve.ts` (+ env override), and cover them in `tui-config.test.ts`
-  and `tui/tui-config.schema.json`.
+## Rules that still hold
 
-### Error handling
+- The window never reads the database or image files. Image bytes come from `entries.get_image`.
+- A delete can be undone for six seconds and happens when the window closes at the latest. A list that arrives meanwhile must not bring the row back.
+- A terminal is pasted into with `terminal_paste_keybind` (Ctrl+Shift+V). The daemon looks up the class of the target window; a name in `terminal_apps` matches the whole class or the part after its last dot.
+- The daemon asks Hyprland through its socket and falls back to `hyprctl` only when there is no socket. A request the socket did not answer in time is not asked again another way: it could act twice.
+- The watcher prefers an image over the text alternative. An announced image that cannot be read is not replaced by its URL.
+- MIME is sniffed. A lying announcement is not stored as an image.
+- Entries are SHA-256 deduplicated.
+- Image files are content-addressed, written atomically, and pruned only when no row references them.
+- A capture error must not kill the watcher. It is logged and shown as `watcher.status.last_error`.
+- The clip is on the clipboard before the paste shortcut is sent. If the shortcut fails, the clip stays there and the window says so.
+- With `DITOX_CLIPBOARD_MOCK` the daemon touches neither the clipboard nor Hyprland.
+- The schema version is 5. Schema 4 is what 0.1 wrote; its watcher added a line break to every text it captured, and the step to 5 takes that one break off. Before any step from an older schema the daemon writes `ditox-v2.db.before-v5` next to the database, because an older daemon refuses a newer schema. A migration has a test that opens an older database.
+- Text is read with `wl-paste --no-newline`. Without it every clip grows a line break and pastes it back.
+- Every child process and every request to Hyprland has a deadline, on the thread that owns the store: `wl-paste` 5 s, Hyprland 3 s, `wl-copy` 10 s.
+- An answer to an older search is dropped (`generation`), so fast typing cannot leave the selection on the wrong clip.
+- Enter pressed while a search is on its way pastes the first result when it arrives, for 1.5 s. Without a daemon, or after the selection moves, Enter is not kept.
+- A press on plain content must not take the keyboard from the search field: the root keeps focus on press.
+- A window that cannot open exits. Rune would keep the process alive without one.
 
-- **The daemon capture loop must never die from a capture error.** Failures
-  are logged (`std.log`) and surfaced via `WatcherStatus.last_error`
-  (runtime-state key `watcher_last_error`); the next poll retries. No bare
-  silent `catch {}` on storage writes in the watcher path.
-- **Carry SQLite error detail.** `Storage` records the last sqlite message
-  (`lastSqliteMessage()`); do not `std.debug.print` from the storage layer.
-- **CLI user errors** should surface as friendly messages, not Zig error traces.
+## RPC
 
-### Rendering (TUI)
+The method table is `crates/ditoxd/src/rpc.rs`: `health.check`, `history.pulse`, `history.pause`, `history.resume`, `entries.list`, `entries.get`, `entries.get_image`, `entries.paste`, `entries.favorite`, `entries.sticky`, `entries.delete`, `clipboard.wake` and `clipboard.ingest`. Each has a caller: the window, the watcher (`ditoxd ingest wake`) or `ditoxd ingest text|image`. A method nothing calls is removed, not kept for later. Result types live in `crates/ditox-rpc/src/types.rs` and the calls the window makes in `client.rs`. A method that changes the history must not be listed in `changes_history`'s read-only set, or the window will not refresh.
 
-- **Never write escape sequences directly to stdout from components.** Native
-  image placement goes through `TerminalImageManager`, which diffs placements
-  and only re-emits on real changes (re-emitting per frame causes flicker).
-- **Effects that decode/allocate must use semantic equality**, not object
-  identity: refresh polls re-create entry objects every tick (see
-  `use-image-block-preview.ts`). Caches holding pixel data must be bounded
-  (LRU) and decoders must enforce dimension guards.
+## Data
 
-### Adding an RPC method (4 touchpoints)
+- `~/.local/share/ditox/ditox-v2.db`
+- `~/.local/share/ditox/images-v2/`
+- `~/.config/ditox/config.toml`
 
-1. `backend/src/rpc.zig`: `dispatch` branch + `validateParams` entry.
-2. `contracts/rpc.schema.json`: method enum + request/success defs.
-3. `bun run build:tui` regenerates `tui/src/generated/rpc-schema.d.ts` (json2ts).
-4. Wrapper in `tui/src/rpc.ts` + tests (backend test and/or `tests/` smoke).
+Tests use temporary directories. To run the daemon by hand, set `DITOX_DATA_DIR`, `DITOX_SOCKET` and `DITOX_CLIPBOARD_MOCK` (see the README). Do not point a development daemon at the real database.
 
-Nothing enforces dispatch ↔ schema agreement at compile time yet; keep them in
-sync manually and update `contracts/fixtures/*.rpc` when shapes change.
-
-### Workflow
-
-- Run `bun run check` before declaring work done.
-- Golden frames: a deliberate visual change requires
-  `DITOX_UPDATE_GOLDENS=1 bun test src/tui-golden.test.tsx` and review of the
-  SVG/PNG artifacts (`DITOX_TUI_ARTIFACTS=1`).
-- Structural UI changes (new chrome/widgets) should extend the shared helpers
-  first instead of duplicating per component.
-
-## Logging
-
-Backend logs via Zig std logging; control verbosity with env where supported.
-CLI commands that print structured user output (`list`, `get`, …) use stdout and
-are not logs.
-
-## Task & Docs Workflow
-
-Docs live in `docs/`:
-
-```text
-docs/
-  ROADMAP.md      Index + status
-  TODO.md         Active worklist
-```
-
-When you finish a unit of work: run `bun run check` (or at least the relevant
-`test:*`) and update `docs/TODO.md` / `docs/ROADMAP.md`. Do not let docs
-describe planned work as if it already exists.
-
-## Release / Distribution
-
-- **Nix flake** — `nix run github:grok-insider/ditox`. CI builds x86_64-linux +
-  aarch64-linux and pushes closures to `https://cache.fabrials.com/fabrials` so users
-  install prebuilt (see `README.md` → Install). The window (`ditox-gui`) is built
-  and pushed on x86_64-linux only.
-- Bump `version` in `flake.nix`; tag `v*` to mark a release. CI runs on tag push.
+Do not open the window on the user's desktop to test it: it reads the active window and `Enter` pastes into it. Use `--snap`, the headless tests, or a nested compositor with a mock daemon.

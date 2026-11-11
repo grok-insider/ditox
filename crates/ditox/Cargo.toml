@@ -1,0 +1,21 @@
+[package]
+name = "ditox"
+description = "Ditox clipboard window"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ditox"
+path = "src/main.rs"
+
+[dependencies]
+ditox-rpc = { path = "../ditox-rpc" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "1ffa8ce5665854b5bf02b7dae415c5facde3af44", default-features = false, features = ["accessibility", "dbus", "svg"] }
+serde_json.workspace = true
+# The same decoders Rune already carries; the window scales pictures itself.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+libc = "0.2"
+
+[dev-dependencies]
+ditoxd = { path = "../ditoxd" }

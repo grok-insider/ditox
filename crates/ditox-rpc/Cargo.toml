@@ -1,0 +1,11 @@
+[package]
+name = "ditox-rpc"
+description = "Wire types, framing and client for the ditoxd socket"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true

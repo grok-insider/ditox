@@ -1,33 +1,7 @@
-# Secrets / local env
 .env
 .direnv/
-
-# Nix build outputs
 result
 result-*
-
-# Zig build outputs
-.zig-cache/
-zig-out/
-zig-out-*/
-
-# Bun / Node
-node_modules/
-bun.lockb
-tui/dist/
-gui/dist/
-
-# TUI dev artifacts
-tui/artifacts/
-
-# Databases
+target/
 *.db
 *.db-*
-
-# Misc
-tmp/
-coverage/
-
-# Tauri build output
-gui/src-tauri/target/
-gui/src-tauri/gen/

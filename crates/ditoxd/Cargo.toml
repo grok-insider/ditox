@@ -1,0 +1,23 @@
+[package]
+name = "ditoxd"
+description = "Ditox clipboard daemon"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "ditoxd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ditoxd"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+ditox-rpc = { path = "../ditox-rpc" }
+libc = "0.2"
+rusqlite = { version = "0.41", features = ["bundled", "functions"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11"

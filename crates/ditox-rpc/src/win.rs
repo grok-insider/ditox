@@ -50,6 +50,8 @@ pub struct Screen {
     pub width: i32,
     pub height: i32,
     pub scale: f64,
+    /// The whole monitor, taskbar included: its corner and its size.
+    pub whole: (i32, i32, i32, i32),
 }
 
 /// A program built for the Windows desktop starts without a console. Started
@@ -242,13 +244,19 @@ fn screen(monitor: *mut c_void) -> Option<Screen> {
         }
         let (mut across, mut down) = (96u32, 96u32);
         GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut across, &mut down);
-        let work = info.rcWork;
+        let (work, whole) = (info.rcWork, info.rcMonitor);
         Some(Screen {
             x: work.left,
             y: work.top,
             width: work.right - work.left,
             height: work.bottom - work.top,
             scale: f64::from(across.max(1)) / 96.0,
+            whole: (
+                whole.left,
+                whole.top,
+                whole.right - whole.left,
+                whole.bottom - whole.top,
+            ),
         })
     }
 }

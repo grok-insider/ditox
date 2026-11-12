@@ -9,6 +9,13 @@
 //! One thread does the asking, so the window never waits for the
 //! compositor. Without the plugin, or when it refuses, the window is told
 //! and shows the picture inside itself as before.
+//!
+//! Windows has no compositor to ask: there the program draws the picture in
+//! a window of its own that nothing can click or give the keyboard to, and
+//! the same worker asks it in the plugin's words (`windows`).
+
+#[cfg(any(windows, test))]
+mod windows;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -24,6 +31,7 @@ use crate::place::{self, Screen};
 
 /// The plugin's name for the picture. One at a time.
 const SURFACE: &str = "ditox.preview";
+#[cfg(not(windows))]
 const WAIT: Duration = Duration::from_millis(500);
 /// How long a closing window waits for the picture to be taken down.
 const FINISH_WAIT: Duration = Duration::from_secs(1);
@@ -437,17 +445,24 @@ pub fn start() {
     {
         let _ = std::thread::Builder::new()
             .name("ditox-overlay".into())
-            .spawn(move || {
-                run(
-                    queue,
-                    Desk {
-                        ask: Box::new(|request| ditox_rpc::hypr::request(request, WAIT)),
-                        shm: PathBuf::from("/dev/shm"),
-                        pid: i64::from(std::process::id()),
-                    },
-                )
-            });
+            .spawn(move || run(queue, desk()));
     }
+}
+
+/// Hyprland and the shared memory its plugin makes.
+#[cfg(not(windows))]
+fn desk() -> Desk {
+    Desk {
+        ask: Box::new(|request| ditox_rpc::hypr::request(request, WAIT)),
+        shm: PathBuf::from("/dev/shm"),
+        pid: i64::from(std::process::id()),
+    }
+}
+
+/// This program's own picture window, answering as the plugin does.
+#[cfg(windows)]
+fn desk() -> Desk {
+    windows::desk()
 }
 
 fn run(queue: Receiver<Command>, desk: Desk) {

@@ -92,7 +92,7 @@ Every request runs on one thread, in order. A `clipboard.wake` asks for a captur
 | `model.rs` | Pure helpers: what a row says, the caption of a clip seen whole, links, search marks, selection |
 | `feed.rs` | The list's background thread that talks to the daemon |
 | `picture.rs` | The threads that decode pictures: one for the clip seen whole, one for the rows |
-| `overlay.rs` | A picture shown large on the screen through the hypr-overlay plugin, and the thread that asks for it |
+| `overlay.rs` | A picture shown large on the screen through the hypr-overlay plugin, and the thread that asks for it. `overlay/windows.rs` is what that thread asks on Windows: a window of the program's own, answering in the plugin's words |
 | `place.rs` | Where the list opens and how large: read from Hyprland as it closes, asked of Hyprland as it opens. On Windows the window places itself (`opening`) and asks Windows where it is (`remember`) |
 | `startup.rs` | Before the window: which Vulkan drivers load, how freed memory is returned |
 | `fixture.rs` | Snapshot scenes |
@@ -128,6 +128,7 @@ Nothing above the platform modules knows which system it runs on. The daemon's `
 - Paste: the list has the keyboard while it asks. It lets the daemon move it (`AllowSetForegroundWindow`) before the request; the daemon gives the keyboard to the target, waits for modifiers still held from choosing the clip, lifts any that stay, and presses the shortcut with `SendInput`. A target that is gone or does not take the keyboard is the same `PasteBack` error as on Hyprland.
 - The key that opens the list is the daemon's (`[ui] open_keybind`, `RegisterHotKey`): it starts the `ditox.exe` beside it. The listener is shown the settings every tick and registers the key again when it changed. A key another program has is a watcher error. On Linux the setting is kept and does nothing: the compositor binds the key.
 - Both programs are built for the Windows desktop, so neither opens a console. Started from one they borrow it (`win::attach_console`), which is how `--version`, the usage and `--snap` statistics are read.
+- An image seen whole is drawn on the screen there too. Windows has no plugin, so `overlay/windows.rs` is the desk: it answers `j/monitors`, `j/clients` and the `hyproverlay` requests itself, names a file where the plugin names shared memory, and draws what the worker wrote in a layered window over everything that takes neither the keyboard nor the pointer. It tells of one screen, the list's, with its corner at zero, so the worker's points become desktop pixels in one place. The window belongs to a thread that only serves its messages. Nothing in `overlay.rs` knows which desk it has.
 - The list takes its place from `list.json` as on Linux, in points from the corner of what the taskbar leaves of the screen. It is read from the window's corner and the size of its content: read from the window's whole frame, it would grow a border every time it closed.
 
 ### Memory

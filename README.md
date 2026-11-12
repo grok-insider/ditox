@@ -116,6 +116,7 @@ Nothing else is needed: the daemon reads and writes the Windows clipboard, finds
 - A screenshot or a copied picture is kept as a PNG; pasted back it is offered as that file and as a bitmap. A bare bitmap beside plain text (spreadsheet cells) is taken as the text.
 - Files copied in Explorer are kept as their `file:` addresses and pasted back as files.
 - The list opens where it was left on the screen the pointer is on, in the middle the first time.
+- An image seen whole (`Tab`) is drawn large on the screen, beside the list, as with hypr-overlay on Hyprland; Ditox draws it itself, so nothing needs installing.
 - Windows does not let a program type into a window that runs as administrator unless it does too.
 
 ## Upgrading from 0.1

@@ -10,7 +10,7 @@ Clipboard manager in Rust: the `ditoxd` daemon and the `ditox` window (Rune).
 - With the hypr-overlay plugin, an image seen whole is drawn large on the screen by the compositor, beside or clear of the list, and follows the selection. Without it, in the window.
 - The options, a window of their own (`ditox options`): history, paste, privacy, the keys, and where things are. The daemon checks what is saved, writes `config.toml` and lives by it at once (`config.get`, `config.set`).
 - Paste into a terminal with its own shortcut. Hyprland is asked through its socket.
-- Windows 10 and 11, with the same daemon, list and options: the clipboard read and written through Win32 (text, HTML, copied files, PNG, JPEG and bitmaps), paste-back with `SendInput`, a key the daemon listens for to open the list, the list where it was left, `ditoxd install` to start with the session. The tests of the three crates pass there.
+- Windows 10 and 11, with the same daemon, list and options: the clipboard read and written through Win32 (text, HTML, copied files, PNG, JPEG and bitmaps), paste-back with `SendInput`, a key the daemon listens for to open the list, the list where it was left, `ditoxd install` to start with the session, and an image seen whole drawn large on the screen by the program itself. The tests of the three crates pass there.
 
 ## Memory and speed
 

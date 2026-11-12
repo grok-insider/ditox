@@ -649,9 +649,11 @@ fn menu(state: &State, open: Menu, p: &Palette) -> El {
                 .radius(theme::RADIUS_TAG)
                 .center_y()
                 .fill(if on { p.selected } else { Color::TRANSPARENT })
+                // The pointer tints the entry it is over and no more, as on
+                // the list's rows: the entry Enter runs moves with the keys.
+                .hover(if on { Color::TRANSPARENT } else { p.hover })
                 .cursor(Cursor::Pointer)
                 .preserve_focus_on_press(true)
-                .on_hover(move |state: &mut State| super::hover_menu_item(state, index))
                 .on_press_tx(move |state: &mut State, tx| super::press_menu_item(state, index, tx))
                 .child(mark)
                 .child(text(item.label).font(theme::BODY).color(p.ink))

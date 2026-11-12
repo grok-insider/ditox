@@ -50,7 +50,7 @@ The window is the clips, a search field under them, and a menu. It follows [Ditt
 
 - A clip shows its first lines (two by default), an image a small picture. The first nine have a number.
 - Pinned clips lead the list, with a mark at their left edge. The window opens on the newest clip below them.
-- The menu (the button at the bottom right, a right click on a clip, or Ctrl+M) has every action with its key, narrows the list to text, images or pinned clips, pauses capture and opens the options.
+- The menu (the button at the bottom right, a right click on a clip, or Ctrl+M) starts on its first entry wherever the pointer is, has every action with its key, narrows the list to text, images or pinned clips, pauses capture and opens the options.
 - Tab shows the selected clip whole: all of a text in the window, or the image.
 - Where Hyprland runs the [hypr-overlay](https://github.com/grok-insider/hypr-overlay) plugin, the image is shown large on the screen instead: drawn by the compositor in the middle of the screen the list is on, with no window around it, taking neither the keyboard nor the pointer. The list stays, and the picture follows the selection until Tab or Escape. When the middle is where the list is, the picture goes beside it. Without the plugin the image is shown in the window.
 - A line appears above the search only while it has something to say: a deleted clip that can come back, capture paused, an error.

@@ -848,12 +848,6 @@ pub fn press_menu_item(state: &mut State, index: usize, tx: &mut Tx) {
     choose(state, index, tx);
 }
 
-pub fn hover_menu_item(state: &mut State, index: usize) {
-    if let Some(menu) = state.menu.as_mut() {
-        menu.at = index;
-    }
-}
-
 pub fn close_menu(state: &mut State, tx: &mut Tx) {
     snap(tx);
     state.menu = None;

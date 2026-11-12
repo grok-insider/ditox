@@ -1197,6 +1197,61 @@ fn the_menu_opens_from_its_button_a_key_and_a_right_click() {
 }
 
 #[test]
+fn the_pointer_over_the_menu_does_not_move_the_entry_enter_runs() {
+    let settle = |runtime: &mut Runtime<State>| {
+        for _ in 0..30 {
+            runtime.frame(1.0 / 60.0);
+        }
+    };
+    // The menu opens under a pointer that was already there.
+    let mut runtime = runtime(fixture::ready());
+    arrive(&mut runtime, fixture::clips());
+    runtime.pointer_move(300.0, 300.0);
+    settle(&mut runtime);
+    key(&mut runtime, Key::Command('m'), ctrl());
+    settle(&mut runtime);
+    assert_eq!(runtime.state.menu, Some(Menu { at: 0 }));
+
+    // The pointer goes over every entry: the one the keys chose stays.
+    key(&mut runtime, Key::Down, Mods::default());
+    for y in (200..520).step_by(7) {
+        runtime.pointer_move(300.0, y as f32);
+        settle(&mut runtime);
+        assert_eq!(runtime.state.menu, Some(Menu { at: 1 }), "at {y}");
+    }
+    let (x, y) = runtime.find("menu-5").unwrap();
+    assert_eq!(labels(&runtime.state)[5], "Delete");
+    runtime.pointer_move(x, y);
+    settle(&mut runtime);
+    feed::take_sent();
+    key(&mut runtime, Key::Enter, Mods::default());
+    assert_eq!(
+        acts(feed::take_sent()),
+        [feed::Command::Paste {
+            id: 3,
+            mode: PasteMode::Plain,
+            target: Some("0xabc".into())
+        }],
+        "Enter runs the entry the keys are on, not the one under the pointer"
+    );
+    assert!(runtime.find("undo").is_none(), "nothing was deleted");
+
+    // A right click opens the menu under the pointer: still the first entry.
+    let mut runtime = super::tests::runtime(fixture::ready());
+    arrive(&mut runtime, fixture::clips());
+    let (x, y) = runtime.find("clip-9").unwrap();
+    runtime.pointer_move(x, y);
+    runtime.secondary_down(x, y);
+    runtime.secondary_up(x, y);
+    settle(&mut runtime);
+    assert_eq!(runtime.state.menu, Some(Menu { at: 0 }));
+
+    // A press on an entry still runs that entry.
+    press(&mut runtime, "menu-5");
+    assert!(runtime.find("undo").is_some(), "the pressed entry ran");
+}
+
+#[test]
 fn the_menu_follows_the_arrows_and_enter_does_what_the_entry_says() {
     let mut runtime = runtime(fixture::ready());
     arrive(&mut runtime, fixture::clips());

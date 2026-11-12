@@ -108,7 +108,7 @@ As it closes, while it is still on screen, the window finds itself among Hyprlan
 
 While a `stay_focused` window is on screen Hyprland gives it every pointer event, with positions outside the window for a pointer that is elsewhere. Four stretches around the root (`elsewhere-*`) take a press there and close the window: a click on something else. Started again while the list has the keyboard, `ditox` asks Hyprland to close it instead of opening another.
 
-The menu is drawn in the window (Rune has no native pop-up menu on Linux). Its entries are data (`State::menu_items`): the view draws them, the keyboard walks them and `choose` runs one. While it is open the keyboard is the menu's.
+The menu is drawn in the window (Rune has no native pop-up menu on Linux). Its entries are data (`State::menu_items`): the view draws them, the keyboard walks them and `choose` runs one. While it is open the keyboard is the menu's. The pointer only tints the entry it is over, as on the list's rows, and a press runs that entry: the entry Enter runs (`Menu::at`) moves with the keys alone, so a menu that opens under a resting pointer, as after a right click, still starts on its first entry.
 
 The options window loads the settings once (`config.get`), keeps what the user types, and on Save sends all of them (`config.set`). The daemon checks them, writes the file, and only then lives by them; a refusal comes back as a sentence under the fields. The list never asks the daemon for settings: it reads the `[ui]` section of the file before its first frame (`ditox_rpc::Ui::load`), so the theme is right from the first pixel.
 

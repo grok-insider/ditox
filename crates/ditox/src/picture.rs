@@ -24,13 +24,19 @@ pub struct Picture {
     pub rgba: Vec<u8>,
 }
 
+thread_local! {
+    /// The window's thread keeps its own count of pixels to a point, so that
+    /// what it asks for does not depend on another window's scale.
+    static DENSITY: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
+}
+
 pub fn set_scale(scale: f32) {
-    let side = if scale > 1.25 {
-        LONG_SIDE_2X
-    } else {
-        LONG_SIDE_1X
-    };
-    LONG_SIDE.store(side, Ordering::Relaxed);
+    let dense = scale > 1.25;
+    DENSITY.with(|density| density.set(if dense { 2 } else { 1 }));
+    LONG_SIDE.store(
+        if dense { LONG_SIDE_2X } else { LONG_SIDE_1X },
+        Ordering::Relaxed,
+    );
 }
 
 pub fn long_side() -> u32 {
@@ -39,6 +45,11 @@ pub fn long_side() -> u32 {
 
 /// The image in `bytes`, no larger than `long_side` on its longest side.
 pub fn fit(bytes: &[u8], long_side: u32) -> Result<Picture, String> {
+    fit_within(bytes, long_side, long_side)
+}
+
+/// The image in `bytes`, made smaller until it is at most `width` by `height`.
+pub fn fit_within(bytes: &[u8], width: u32, height: u32) -> Result<Picture, String> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|err| err.to_string())?;
@@ -46,8 +57,9 @@ pub fn fit(bytes: &[u8], long_side: u32) -> Result<Picture, String> {
     limits.max_alloc = Some(DECODE_BUDGET);
     reader.limits(limits);
     let image = reader.decode().map_err(|err| err.to_string())?;
-    let image = if image.width().max(image.height()) > long_side.max(1) {
-        image.thumbnail(long_side, long_side)
+    let (width, height) = (width.max(1), height.max(1));
+    let image = if image.width() > width || image.height() > height {
+        image.thumbnail(width, height)
     } else {
         image
     };
@@ -57,6 +69,36 @@ pub fn fit(bytes: &[u8], long_side: u32) -> Result<Picture, String> {
         height: rgba.height(),
         rgba: rgba.into_raw(),
     })
+}
+
+/// How many device pixels a point of the window takes, as far as pictures
+/// care. Asked on the window's thread, where `set_scale` is called.
+pub fn density() -> u32 {
+    DENSITY.with(|density| density.get())
+}
+
+/// A picture for a row of the list: every one asked for is made, in order.
+pub struct ThumbJob {
+    pub id: i64,
+    pub bytes: Vec<u8>,
+    pub fit: (u32, u32),
+}
+
+/// A thread that makes the small pictures of the list's rows.
+pub fn thumb_worker(
+    done: impl Fn(i64, Result<Picture, String>) + Send + 'static,
+) -> Sender<ThumbJob> {
+    let (jobs, queue) = mpsc::channel::<ThumbJob>();
+    let _ = std::thread::Builder::new()
+        .name("ditox-thumbs".into())
+        .spawn(move || {
+            while let Ok(job) = queue.recv() {
+                let picture = fit_within(&job.bytes, job.fit.0, job.fit.1);
+                drop(job.bytes);
+                done(job.id, picture);
+            }
+        });
+    jobs
 }
 
 pub struct Job {

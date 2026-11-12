@@ -3,7 +3,7 @@
 Ditox is a clipboard manager for Linux/Wayland (first target: Hyprland). It is written in Rust.
 
 - **`ditoxd`** owns the clipboard, the SQLite history, image files, and paste-back.
-- **`ditox`** is the window, built with [Rune](https://github.com/anomalyco/rune): search, preview, pin, delete, and paste.
+- **`ditox`** is the window, built with [Rune](https://github.com/anomalyco/rune): a list of clips with a search field under it. `ditox options` is a second window for the settings.
 - They talk JSON-RPC 2.0 over `$XDG_RUNTIME_DIR/ditox/rpc.sock`. The window never opens the database.
 
 ## Install
@@ -42,7 +42,16 @@ windowrule = float, class:^(dev\.ditox)$
 
 `ditoxd` needs `wl-paste` and `wl-copy` (wl-clipboard) on its `PATH`. It talks to Hyprland through its socket and falls back to `hyprctl`. The Nix package wraps them in.
 
-## Window
+## The list
+
+The window is the clips, a search field under them, and a menu. It follows [Ditto](https://github.com/sabrogden/Ditto): nothing else is on screen until it is asked for.
+
+- A clip shows its first lines (two by default), an image a small picture. The first nine have a number.
+- Pinned clips lead the list, with a mark at their left edge. The window opens on the newest clip below them.
+- The menu (the button at the bottom right, a right click on a clip, or Ctrl+M) has every action with its key, narrows the list to text, images or pinned clips, pauses capture and opens the options.
+- Tab shows the selected clip whole: all of a text, or the image at the size of the window.
+- A line appears above the search only while it has something to say: a deleted clip that can come back, capture paused, an error.
+- The window closes when another window takes the keyboard. The options can turn that off.
 
 | Key | Does |
 |-----|------|
@@ -52,27 +61,36 @@ windowrule = float, class:^(dev\.ditox)$
 | Enter | Paste the clip as it was copied |
 | Shift+Enter | Paste its plain text |
 | Ctrl+Enter | Copy it without pasting |
+| Ctrl+1 to Ctrl+9 | Paste the clip with that number |
+| Tab, F3 | See the clip whole, and back |
+| Ctrl+M, F10 | Open the menu |
 | Ctrl+O | Open a link |
-| Tab, Shift+Tab | Next and previous filter: All, Text, Images, Pinned |
-| Ctrl+1 to Ctrl+4 | Go to a filter |
 | Ctrl+P | Pin or unpin |
 | Delete, Ctrl+D | Delete. Delete edits the search while there is one |
 | Ctrl+Z | Bring back what was just deleted |
 | Ctrl+Shift+P | Pause or resume capture |
-| F1 | Show every key |
-| Escape | Clear the search, then close |
+| Ctrl+, | Open the options |
+| Escape | Leave the clip, then clear the search, then close |
 
-- The window opens on the newest clip. Pinned clips sit above it, the rest under Today, Yesterday, Last 7 days and Older.
-- A row shows what its clip is: text, an image, a link, or a colour with its swatch.
 - A deleted clip can come back for six seconds, or until the window closes.
-- The buttons under the preview pin, delete and open a link with the pointer.
-- Without a window to paste into (another compositor, `hyprctl` missing), Enter says Copy and only copies.
-- The status at the bottom right says whether the daemon is watching. Click it to pause or resume.
+- Without a window to paste into (another compositor, `hyprctl` missing), Enter only copies and the menu says Copy.
 - A missing daemon is shown as such. The window does not start one.
+
+## The options
+
+`ditox options`, Ctrl+, in the list, or Options in its menu. It is a separate window with five tabs:
+
+- **General**: how many clips to keep, after how many days to delete them, whether a clip copied again is kept again, the theme, how many lines a clip gets in the list, and whether the list closes when it loses the keyboard.
+- **Paste**: whether choosing a clip pastes it, the shortcut Ditox presses, the one for terminals, which windows are terminals, and the wait before the paste.
+- **Privacy**: the apps, window titles and text patterns that are never saved.
+- **Keys**: every key of the list.
+- **About**: versions and where the settings and the history are.
+
+Save asks the daemon to check the settings, write `config.toml` and live by them at once; the list reads the file the next time it opens. The daemon rewrites the file whole, so comments in it are lost. A `config.toml` that is a link into a read-only place (a system configuration put it there) is shown and cannot be saved.
 
 ### Memory
 
-The window loads only the Vulkan driver of the GPU that drives a screen, and keeps pictures at the size it draws them. On an NVIDIA desktop it opens at about 110 MB resident, of which about 80 MB is the driver's own libraries, shared with every other program that draws with the GPU. If the window cannot open with the driver it picked, it starts again with all of them. `DITOX_ALL_GPU_DRIVERS=1`, or any of the Vulkan loader's own `VK_*` driver variables, turns the choice off.
+The window loads only the Vulkan driver of the GPU that drives a screen, and keeps pictures at the size it draws them: a row's picture is a few thousand pixels. On an NVIDIA desktop it opens at about 110 MB resident, of which about 80 MB is the driver's own libraries, shared with every other program that draws with the GPU. If the window cannot open with the driver it picked, it starts again with all of them. `DITOX_ALL_GPU_DRIVERS=1`, or any of the Vulkan loader's own `VK_*` driver variables, turns the choice off.
 
 ## Upgrading from 0.1
 
@@ -107,7 +125,14 @@ terminal_apps = ["kitty", "ghostty", "alacritty", "foot"]   # the default list i
 excluded_apps = ["KeePassXC", "Bitwarden"]
 excluded_windows = []
 secret_patterns = ["ghp_", "AKIA[A-Z0-9]{16}"]
+
+[ui]
+theme = "system"            # or "dark", "light"
+lines = 2                   # lines of each clip in the list, 1 to 5
+close_on_blur = true        # the list closes when another window takes the keyboard
 ```
+
+A string is in double quotes; `\"` and `\\` stand for a quote and a backslash inside one. An array is on one line.
 
 Password managers, clipboard offers marked sensitive, and text that matches a secret pattern are not stored.
 
@@ -118,6 +143,7 @@ nix develop
 cargo test --workspace
 cargo run -p ditox -- --snap /tmp/ditox.png --scene ready
 cargo run -p ditox -- --list-scenes
+cargo run -p ditox -- options --snap /tmp/options.png --scene general
 ```
 
 Rune is pinned in `crates/ditox/Cargo.toml`. Headless snapshots (`--snap`) need Vulkan.
@@ -140,4 +166,4 @@ ditoxd ingest image < shot.png
 
 ## Licences
 
-The window embeds IBM Plex Sans and IBM Plex Mono (SIL Open Font License, `crates/ditox/assets/fonts/OFL.txt`) and eight Lucide icons (ISC).
+The window embeds IBM Plex Sans and IBM Plex Mono (SIL Open Font License, `crates/ditox/assets/fonts/OFL.txt`) and four Lucide icons (ISC).

@@ -1,8 +1,9 @@
-use ditox_rpc::{Entry, Filter, Kind, WatcherStatus};
+use ditox_rpc::{ConfigView, Entry, Filter, Kind, Settings, Theme, Ui, WatcherStatus};
 use rune::Pixels;
 
-use crate::State;
+use crate::list::{Menu, State};
 use crate::model::Link;
+use crate::options::{self, Load, Tab};
 
 pub const NOW_MS: i64 = 1_800_000_000_000;
 
@@ -10,48 +11,26 @@ pub type Scene = (&'static str, fn(&mut State));
 
 pub const SCENES: &[Scene] = &[
     ("ready", |state| *state = ready()),
-    ("light", |state| {
-        *state = State {
-            dark: Some(false),
-            ..ready()
-        }
-    }),
-    ("image", |state| *state = image()),
-    ("image-light", |state| {
-        *state = State {
-            dark: Some(false),
-            ..image()
-        }
-    }),
-    ("small-image", |state| *state = small_image()),
-    ("odd", |state| *state = odd(0)),
-    ("odd-url", |state| *state = odd(1)),
-    ("odd-rtl", |state| *state = odd(2)),
-    ("odd-blank", |state| *state = odd(4)),
-    ("odd-app", |state| *state = odd(5)),
+    ("light", |state| *state = light(ready())),
+    ("one-line", |state| *state = lines(1)),
+    ("four-lines", |state| *state = lines(4)),
     ("search", |state| *state = search()),
-    ("link", |state| *state = chosen(5)),
-    ("color", |state| *state = chosen(8)),
-    ("keys", |state| {
-        *state = State {
-            keys_open: true,
-            ..ready()
-        }
-    }),
-    ("keys-light", |state| {
-        *state = State {
-            keys_open: true,
-            dark: Some(false),
-            ..ready()
-        }
-    }),
-    ("undo", |state| *state = undo()),
-    ("no-target", |state| {
-        *state = State {
+    ("menu", |state| *state = menu(ready())),
+    ("menu-light", |state| *state = light(menu(ready()))),
+    ("menu-link", |state| *state = menu(chosen(5))),
+    ("menu-no-target", |state| {
+        *state = menu(State {
             target: None,
             ..ready()
-        }
+        })
     }),
+    ("peek", |state| *state = peek(3)),
+    ("peek-light", |state| *state = light(peek(3))),
+    ("peek-image", |state| *state = peek(4)),
+    ("peek-link", |state| *state = peek(5)),
+    ("odd", |state| *state = odd()),
+    ("undo", |state| *state = undo()),
+    ("images", |state| *state = images()),
     ("long", |state| *state = long()),
     ("no-results", |state| *state = no_results()),
     ("empty", |state| {
@@ -162,44 +141,63 @@ fn watching() -> WatcherStatus {
 }
 
 pub fn ready() -> State {
-    State {
+    let mut state = State {
         clips: clips(),
         selected: 2,
         link: Link::Ready,
         watcher: Some(watching()),
         target: Some("0xabc".into()),
         now_ms: NOW_MS,
-        day_start_ms: Some(NOW_MS - 10 * 3_600_000),
         dark: Some(true),
         ..State::blank()
+    };
+    state.thumbs.keep(4, storm(160, 100), 0);
+    state
+}
+
+fn light(state: State) -> State {
+    State {
+        dark: Some(false),
+        ..state
     }
 }
 
-fn image() -> State {
+fn lines(lines: u32) -> State {
     let mut state = ready();
-    state.selected = 3;
-    state.images.insert(4, storm(960, 600));
+    state.ui.lines = lines;
     state
 }
 
-fn small_image() -> State {
-    let mut state = image();
-    state.clips[3].image_width = Some(96);
-    state.clips[3].image_height = Some(60);
-    state.images.insert(4, storm(96, 60));
+fn menu(mut state: State) -> State {
+    state.menu = Some(Menu { at: 0 });
     state
 }
 
-/// Content that tends to break a layout: no spaces, tabs, long lines, other
-/// scripts, emoji, nothing but whitespace.
-fn odd(selected: usize) -> State {
-    let mixed = "\tfn main() {\n\t\tlet greeting = \"\u{4f60}\u{597d}\u{ff0c}\u{4e16}\u{754c} \u{1f44b} caf\u{e9} na\u{ef}ve\";\n\t\tprintln!(\"{greeting}\");\n\t}\n\n\n    trailing spaces   \n\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}\u{3082}\u{6298}\u{308a}\u{8fd4}\u{3055}\u{308c}\u{307e}\u{3059}\u{3002}\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}\u{3082}\u{6298}\u{308a}\u{8fd4}\u{3055}\u{308c}\u{307e}\u{3059}\u{3002}";
+pub fn chosen(id: i64) -> State {
+    let mut state = ready();
+    state.selected = state
+        .clips
+        .iter()
+        .position(|clip| clip.id == id)
+        .unwrap_or(0);
+    state
+}
+
+fn peek(id: i64) -> State {
+    let mut state = chosen(id);
+    state.peek = true;
+    state.images.keep(4, storm(960, 600), 0);
+    state
+}
+
+fn odd() -> State {
+    let mixed = "\tfn main() {\n\t\tlet greeting = \"\u{4f60}\u{597d}\u{ff0c}\u{4e16}\u{754c} \u{1f44b} caf\u{e9} na\u{ef}ve\";\n\t\tprintln!(\"{greeting}\");\n\t}\n";
     let url = format!(
         "https://example.com/{}?token={}",
         "very/long/path/".repeat(12),
         "a1b2c3d4".repeat(20)
     );
-    let rtl = "\u{645}\u{631}\u{62d}\u{628}\u{627} \u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645}\u{60c} \u{647}\u{630}\u{627} \u{646}\u{635} \u{639}\u{631}\u{628}\u{64a} \u{637}\u{648}\u{64a}\u{644} \u{64a}\u{62c}\u{628} \u{623}\u{646} \u{64a}\u{644}\u{62a}\u{641} \u{639}\u{644}\u{649} \u{623}\u{643}\u{62b}\u{631} \u{645}\u{646} \u{633}\u{637}\u{631} \u{648}\u{627}\u{62d}\u{62f} \u{641}\u{64a} \u{627}\u{644}\u{645}\u{639}\u{627}\u{64a}\u{646}\u{629}.\nsecond line in English";
+    let rtl = "\u{645}\u{631}\u{62d}\u{628}\u{627} \u{628}\u{627}\u{644}\u{639}\u{627}\u{644}\u{645}\u{60c} \u{647}\u{630}\u{627} \u{646}\u{635} \u{639}\u{631}\u{628}\u{64a} \u{637}\u{648}\u{64a}\u{644}";
     let emoji = "\u{1f600}\u{1f680}\u{1f1ea}\u{1f1f8} \u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} done \u{2705}";
     let mut clips = vec![
         text(1, mixed, "zed", 1),
@@ -207,35 +205,35 @@ fn odd(selected: usize) -> State {
         text(3, rtl, "telegram", 3),
         text(4, emoji, "", 4),
         text(5, " \n\t \n", "ghostty", 5),
-        text(
-            6,
-            "x",
-            "a-very-long-application-class-name.that.keeps.going.Application",
-            6,
-        ),
+        text(6, "x", "kitty", 6),
         text(7, &"word ".repeat(400), "obsidian", 7),
+        Entry {
+            image_width: Some(2400),
+            image_height: Some(300),
+            ..picture(8, 8)
+        },
+        Entry {
+            image_width: Some(300),
+            image_height: Some(2400),
+            ..picture(9, 9)
+        },
+        Entry {
+            image_width: Some(16),
+            image_height: Some(16),
+            ..picture(10, 10)
+        },
+        picture(11, 11),
     ];
     clips[6].favorite = true;
-    clips.rotate_right(1);
-    let selected = clips
-        .iter()
-        .position(|clip| clip.id == selected as i64 + 1)
-        .unwrap_or(0);
-    State {
+    clips.rotate_right(5);
+    let mut state = State {
         clips,
-        selected,
+        selected: 1,
         ..ready()
-    }
-}
-
-/// The usual history with the clip `id` selected.
-fn chosen(id: i64) -> State {
-    let mut state = ready();
-    state.selected = state
-        .clips
-        .iter()
-        .position(|clip| clip.id == id)
-        .unwrap_or(0);
+    };
+    state.thumbs.keep(8, storm(480, 60), 0);
+    state.thumbs.keep(9, storm(10, 80), 0);
+    state.thumbs.keep(10, storm(16, 16), 0);
     state
 }
 
@@ -246,6 +244,34 @@ fn undo() -> State {
     state
 }
 
+fn images() -> State {
+    let mut state = ready();
+    state.filter = Filter::Images;
+    state.clips = (0..7)
+        .map(|index| Entry {
+            image_width: Some([960, 1920, 640, 3840, 400, 1280, 800][index as usize]),
+            image_height: Some([600, 1080, 640, 2160, 900, 720, 200][index as usize]),
+            ..picture(40 + index, index * 7)
+        })
+        .collect();
+    for clip in &state.clips {
+        let (width, height) = (
+            clip.image_width.unwrap_or(1) as f32,
+            clip.image_height.unwrap_or(1) as f32,
+        );
+        let scale = (80.0 / height).min(480.0 / width);
+        if clip.id != 44 {
+            state.thumbs.keep(
+                clip.id,
+                storm((width * scale) as u32, (height * scale) as u32),
+                0,
+            );
+        }
+    }
+    state.selected = 1;
+    state
+}
+
 fn search() -> State {
     let mut state = ready();
     state.query = rune::TextEdit::new("cargo");
@@ -253,7 +279,6 @@ fn search() -> State {
     state
         .clips
         .retain(|clip| clip.content.contains("cargo") || clip.content.contains("capture"));
-    state.grouped = false;
     state.selected = 0;
     state
 }
@@ -341,4 +366,86 @@ pub fn storm(width: u32, height: u32) -> Pixels {
     let pixels = Pixels::new();
     pixels.set(width, height, rgba);
     pixels
+}
+
+pub type OptionsScene = (&'static str, fn(&mut options::State));
+
+pub const OPTIONS_SCENES: &[OptionsScene] = &[
+    ("general", |state| *state = options(Tab::General)),
+    ("general-light", |state| {
+        *state = options(Tab::General);
+        state.theme = Theme::Light;
+        state.dark = Some(false);
+    }),
+    ("paste", |state| *state = options(Tab::Paste)),
+    ("privacy", |state| *state = options(Tab::Privacy)),
+    ("keys", |state| *state = options(Tab::Keys)),
+    ("about", |state| *state = options(Tab::About)),
+    ("read-only", |state| {
+        let mut view = config_view();
+        view.writable = false;
+        view.path = "/home/friend/.config/ditox/config.toml".into();
+        state.show(view);
+        state.dark = Some(true);
+    }),
+    ("refused", |state| {
+        *state = options(Tab::Paste);
+        state.keybind = rune::TextEdit::new("ctrl+");
+        state.error = Some("\"ctrl+\" is not a paste keybind.".into());
+    }),
+    ("loading", |state| state.dark = Some(true)),
+    ("options-offline", |state| {
+        state.dark = Some(true);
+        state.load = Load::Offline(
+            "/run/user/1000/ditox/rpc.sock: No such file or directory (os error 2)".into(),
+        );
+    }),
+];
+
+pub fn config_view() -> ConfigView {
+    ConfigView {
+        settings: Settings {
+            max_entries: 1000,
+            delete_after_seconds: 0,
+            allow_duplicates: false,
+            paste_enabled: true,
+            paste_buffer_ms: 120,
+            paste_keybind: "ctrl+v".into(),
+            terminal_paste_keybind: "ctrl+shift+v".into(),
+            terminal_apps: [
+                "kitty",
+                "ghostty",
+                "alacritty",
+                "foot",
+                "wezterm",
+                "konsole",
+                "rio",
+            ]
+            .map(String::from)
+            .to_vec(),
+            excluded_apps: ["1Password", "Bitwarden", "KeePassXC"]
+                .map(String::from)
+                .to_vec(),
+            excluded_windows: Vec::new(),
+            secret_patterns: ["-----BEGIN PRIVATE KEY-----", "ghp_", "AKIA[A-Z0-9]{16}"]
+                .map(String::from)
+                .to_vec(),
+            ui: Ui {
+                theme: Theme::Dark,
+                lines: 2,
+                close_on_blur: true,
+            },
+        },
+        path: "/home/friend/.config/ditox/config.toml".into(),
+        writable: true,
+        database: "/home/friend/.local/share/ditox/ditox-v2.db".into(),
+        version: "0.2.0".into(),
+    }
+}
+
+pub fn options(tab: Tab) -> options::State {
+    let mut state = options::State::blank();
+    state.show(config_view());
+    state.tab = tab;
+    state
 }

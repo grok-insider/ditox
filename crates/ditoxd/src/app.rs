@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use ditox_rpc::{IngestResult, Kind, PasteMode, PasteResult, WatcherStatus};
+use ditox_rpc::{ConfigView, IngestResult, Kind, PasteMode, PasteResult, Settings, WatcherStatus};
 
 use crate::clipboard::{Clipboard, ClipboardRead, MimeList};
 use crate::config::Config;
@@ -98,6 +98,27 @@ impl App {
 
     pub fn take_capture_request(&mut self) -> bool {
         std::mem::take(&mut self.capture_pending)
+    }
+
+    pub fn config_view(&self) -> ConfigView {
+        ConfigView {
+            settings: self.cfg.settings(),
+            path: self.cfg.config_path.clone(),
+            writable: self.cfg.writable(),
+            database: self.cfg.db_path.clone(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        }
+    }
+
+    /// Takes new settings: checks them, writes the file, then lives by them.
+    /// A setting the daemon cannot take, or a file it cannot write, changes nothing.
+    pub fn set_settings(&mut self, settings: &Settings) -> Result<ConfigView> {
+        let mut next = self.cfg.clone();
+        next.apply_settings(settings)?;
+        next.save()?;
+        self.cfg = next;
+        self.store.apply_retention(&self.cfg)?;
+        Ok(self.config_view())
     }
 
     pub fn watcher_status(&self) -> Result<WatcherStatus> {

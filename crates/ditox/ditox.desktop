@@ -5,3 +5,8 @@ Exec=ditox
 Terminal=false
 Type=Application
 Categories=Utility;
+Actions=options;
+
+[Desktop Action options]
+Name=Options
+Exec=ditox options

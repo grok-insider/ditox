@@ -8,6 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::frame::{FrameReader, write_frame};
+use crate::settings::{ConfigView, Settings};
 use crate::types::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +173,16 @@ impl Client {
 
     pub fn resume(&mut self) -> Result<(), RpcError> {
         self.call::<Value>("history.resume", json!({})).map(drop)
+    }
+
+    pub fn config(&mut self) -> Result<ConfigView, RpcError> {
+        self.call("config.get", json!({}))
+    }
+
+    /// Asks the daemon to take these settings and write them to its file.
+    /// It answers with the settings as it holds them afterwards.
+    pub fn set_config(&mut self, settings: &Settings) -> Result<ConfigView, RpcError> {
+        self.call("config.set", json!({ "settings": settings }))
     }
 
     pub fn wake(&mut self, sensitive: bool) -> Result<(), RpcError> {

@@ -1,6 +1,8 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use ditox_rpc::{
@@ -13,6 +15,9 @@ use crate::picture::{self, Picture};
 
 pub const LIST_LIMIT: u32 = 300;
 const PULSE: Duration = Duration::from_millis(250);
+/// The wait between turns while rows still wait for their pictures.
+const BUSY_PULSE: Duration = Duration::from_millis(8);
+const THUMBS_AT_ONCE: usize = 2;
 /// How long a deleted clip can still be brought back.
 pub const UNDO_TIME: Duration = Duration::from_secs(6);
 /// How long a closing window waits for the feed to do what was pending.
@@ -27,6 +32,12 @@ pub enum Command {
     },
     /// The clip whose whole text or image the window is waiting for, if any.
     Want(Option<Wanted>),
+    /// The image clips whose rows are in view and have no small picture yet,
+    /// and the pixels each has room for. It replaces the list asked for before.
+    Thumbs {
+        ids: Vec<i64>,
+        fit: (u32, u32),
+    },
     Paste {
         id: i64,
         mode: PasteMode,
@@ -46,6 +57,8 @@ pub enum Command {
     },
     /// Open a web address with the desktop's handler.
     Open(String),
+    /// Open the options window.
+    Options,
     Pause(bool),
     /// The window is closing: do now what was waiting.
     Finish,
@@ -80,6 +93,13 @@ pub enum Event {
         id: i64,
         picture: Picture,
     },
+    /// The small picture of an image clip's row.
+    Thumb {
+        id: i64,
+        picture: Picture,
+    },
+    /// That row gets no picture, and asking again will not help.
+    NoThumb(i64),
     /// The clip cannot be shown, and asking again will not help.
     Unavailable(i64, Gone),
     /// The time to undo this delete is over; the clip is gone.
@@ -198,6 +218,13 @@ enum Fetched {
     Image(Vec<u8>),
 }
 
+fn thumbed(id: i64, picture: Result<Picture, String>) -> Event {
+    match picture {
+        Ok(picture) => Event::Thumb { id, picture },
+        Err(_) => Event::NoThumb(id),
+    }
+}
+
 fn pictured(id: i64, picture: Result<Picture, String>) -> Event {
     match picture {
         Ok(picture) => Event::Picture { id, picture },
@@ -222,6 +249,12 @@ struct Session {
     socket: Option<PathBuf>,
     /// Where fetched pictures go to be decoded. Without it they are decoded here.
     pictures: Option<Sender<picture::Job>>,
+    /// The rows still waiting for their small picture, nearest first.
+    thumbs: VecDeque<i64>,
+    thumb_fit: (u32, u32),
+    thumb_jobs: Option<Sender<picture::ThumbJob>>,
+    /// Small pictures fetched and not made yet. Each holds a whole image file.
+    thumbs_in_flight: Arc<AtomicUsize>,
     /// What happened, for the window, in order.
     out: Vec<Event>,
 }
@@ -242,6 +275,10 @@ impl Session {
             undo_time: UNDO_TIME,
             socket,
             pictures: None,
+            thumbs: VecDeque::new(),
+            thumb_fit: (1, 1),
+            thumb_jobs: None,
+            thumbs_in_flight: Arc::new(AtomicUsize::new(0)),
             out: Vec::new(),
         }
     }
@@ -256,6 +293,45 @@ impl Session {
         self.reap(Instant::now());
         self.sync();
         self.fetch_wanted();
+        self.fetch_thumb();
+    }
+
+    /// Whether there is more to do before the next pulse is due.
+    fn busy(&self) -> bool {
+        !self.thumbs.is_empty()
+    }
+
+    /// Fetches one row's picture and hands it on to be made small. At most
+    /// `THUMBS_AT_ONCE` wait to be made: each is a whole image file in memory.
+    fn fetch_thumb(&mut self) {
+        if self.offline {
+            // The window asks again when the list is back.
+            self.thumbs.clear();
+            return;
+        }
+        if self.thumbs_in_flight.load(Ordering::Acquire) >= THUMBS_AT_ONCE {
+            return;
+        }
+        let Some(id) = self.thumbs.pop_front() else {
+            return;
+        };
+        match self.call(|client| client.image(id)) {
+            Ok(bytes) => match &self.thumb_jobs {
+                Some(jobs) => {
+                    self.thumbs_in_flight.fetch_add(1, Ordering::AcqRel);
+                    let fit = self.thumb_fit;
+                    if jobs.send(picture::ThumbJob { id, bytes, fit }).is_err() {
+                        self.thumbs_in_flight.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
+                None => self.out.push(thumbed(
+                    id,
+                    picture::fit_within(&bytes, self.thumb_fit.0, self.thumb_fit.1),
+                )),
+            },
+            Err(RpcError::Transport(_)) => self.thumbs.clear(),
+            Err(_) => self.out.push(Event::NoThumb(id)),
+        }
     }
 
     fn call<T>(
@@ -358,6 +434,10 @@ impl Session {
                 self.revision = None;
             }
             Command::Want(wanted) => self.wanted = wanted,
+            Command::Thumbs { ids, fit } => {
+                self.thumbs = ids.into();
+                self.thumb_fit = fit;
+            }
             Command::Paste { id, mode, target } => {
                 match self.call(|client| client.paste(id, mode, target.as_deref())) {
                     Ok(result) if result.pasted => self.out.push(Event::Pasted),
@@ -382,6 +462,7 @@ impl Session {
                 self.revision = None;
             }
             Command::Open(address) => open(&address),
+            Command::Options => open_options(),
             Command::Finish => {
                 for (_, at) in &mut self.doomed {
                     *at = Instant::now();
@@ -443,6 +524,19 @@ fn open(address: &str) {
         .spawn();
 }
 
+/// Starts the options window: this program again, asked for its other window.
+fn open_options() {
+    let Ok(program) = std::env::current_exe() else {
+        return;
+    };
+    let _ = std::process::Command::new(program)
+        .arg("options")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 fn explain(err: &RpcError) -> String {
     match err {
         RpcError::Remote { code, .. } if *code == METHOD_NOT_FOUND => {
@@ -455,6 +549,11 @@ fn explain(err: &RpcError) -> String {
 fn run(queue: Receiver<Command>) {
     let mut session = Session::new(None);
     session.pictures = Some(picture::worker(|id, picture| push(pictured(id, picture))));
+    let in_flight = session.thumbs_in_flight.clone();
+    session.thumb_jobs = Some(picture::thumb_worker(move |id, picture| {
+        in_flight.fetch_sub(1, Ordering::AcqRel);
+        push(thumbed(id, picture));
+    }));
     let mut commands = Vec::new();
     loop {
         let closing = commands.contains(&Command::Finish);
@@ -465,7 +564,8 @@ fn run(queue: Receiver<Command>) {
         if closing {
             finished();
         }
-        match queue.recv_timeout(PULSE) {
+        let wait = if session.busy() { BUSY_PULSE } else { PULSE };
+        match queue.recv_timeout(wait) {
             Ok(command) => {
                 commands.push(command);
                 commands.extend(queue.try_iter());
@@ -477,4 +577,4 @@ fn run(queue: Receiver<Command>) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

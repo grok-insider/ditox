@@ -14,13 +14,13 @@ use ditoxd::server;
 
 use super::*;
 
-struct Daemon {
+pub(crate) struct Daemon {
     root: PathBuf,
-    socket: PathBuf,
+    pub(crate) socket: PathBuf,
 }
 
 impl Daemon {
-    fn start(label: &str) -> Daemon {
+    pub(crate) fn start(label: &str) -> Daemon {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
             "ditox-feed-{label}-{}-{}",
@@ -42,8 +42,10 @@ impl Daemon {
         let (requests, queue) = mpsc::channel();
         server::accept(listener, requests);
         let (data, clip) = (self.path("data"), self.path("clipboard"));
+        let config = self.path("config/ditox/config.toml");
         std::thread::spawn(move || {
             let mut cfg = Config::defaults(&data);
+            cfg.config_path = config;
             cfg.excluded_apps.clear();
             std::fs::create_dir_all(&cfg.image_dir).unwrap();
             let app = App::open(cfg, Clipboard::mock(&clip), Box::new(NoDesktop)).unwrap();
@@ -51,7 +53,7 @@ impl Daemon {
         });
     }
 
-    fn path(&self, name: &str) -> String {
+    pub(crate) fn path(&self, name: &str) -> String {
         self.root.join(name).to_string_lossy().into_owned()
     }
 
@@ -216,6 +218,90 @@ fn the_whole_clip_and_the_picture_come_when_asked_and_a_missing_one_is_said_once
         "a file that is not a picture is said, not retried"
     );
     assert!(turn(&mut session, Vec::new()).is_empty());
+}
+
+#[test]
+fn the_rows_pictures_come_small_one_a_turn_and_only_the_ones_last_asked_for() {
+    let daemon = Daemon::start("thumbs");
+    let mut client = daemon.client();
+    let mut image = |width, height| {
+        client
+            .ingest(Kind::Image, &png(width, height))
+            .unwrap()
+            .id
+            .unwrap()
+    };
+    let (wide, tall, tiny) = (image(4000, 1000), image(300, 900), image(20, 10));
+    let text = client.ingest(Kind::Text, b"words").unwrap().id.unwrap();
+    let mut broken = png(64, 64);
+    broken.truncate(60);
+    let broken = client.ingest(Kind::Image, &broken).unwrap().id.unwrap();
+
+    let mut session = daemon.session();
+    turn(&mut session, Vec::new());
+    assert!(!session.busy());
+    let thumbs = |ids: Vec<i64>| Command::Thumbs {
+        ids,
+        fit: (240, 40),
+    };
+    let sizes = |events: &[Event]| -> Vec<(i64, u32, u32)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Thumb { id, picture } => Some((*id, picture.width, picture.height)),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let events = turn(&mut session, vec![thumbs(vec![wide, tall, tiny])]);
+    assert_eq!(sizes(&events), [(wide, 160, 40)], "one picture a turn");
+    assert!(session.busy(), "and the next turn comes at once");
+    let events = turn(&mut session, Vec::new());
+    assert_eq!(sizes(&events), [(tall, 13, 40)]);
+    let events = turn(&mut session, Vec::new());
+    assert_eq!(
+        sizes(&events),
+        [(tiny, 20, 10)],
+        "a small one is not made larger"
+    );
+    assert!(!session.busy());
+    assert!(turn(&mut session, Vec::new()).is_empty());
+
+    let events = turn(
+        &mut session,
+        vec![thumbs(vec![wide, tall]), thumbs(vec![text, broken, 9999])],
+    );
+    assert!(
+        matches!(&events[..], [Event::NoThumb(id)] if *id == text),
+        "the list asked for last replaces the one before it: {}",
+        events.len()
+    );
+    let events = turn(&mut session, Vec::new());
+    assert!(matches!(&events[..], [Event::NoThumb(id)] if *id == broken));
+    let events = turn(&mut session, Vec::new());
+    assert!(matches!(&events[..], [Event::NoThumb(9999)]));
+    assert!(!session.busy());
+
+    session
+        .thumbs_in_flight
+        .store(THUMBS_AT_ONCE, Ordering::Release);
+    assert!(
+        turn(&mut session, vec![thumbs(vec![wide])]).is_empty(),
+        "with enough waiting to be made, no more are fetched"
+    );
+    assert!(session.busy());
+    session.thumbs_in_flight.store(0, Ordering::Release);
+    assert_eq!(sizes(&turn(&mut session, Vec::new())), [(wide, 160, 40)]);
+
+    session.socket = Some(PathBuf::from(daemon.path("nowhere.sock")));
+    session.client = None;
+    let events = turn(&mut session, vec![thumbs(vec![wide, tall])]);
+    assert!(matches!(&events[..], [Event::Offline(_)]));
+    assert!(
+        !session.busy(),
+        "without a daemon nothing waits to be fetched"
+    );
 }
 
 #[test]

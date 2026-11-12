@@ -265,6 +265,11 @@ fn is_lua_parse_error(reply: &str) -> bool {
     reply.contains("[string \"return hl.dispatch(")
 }
 
+/// Whether `keybind` names a shortcut Hyprland can be asked to send.
+pub fn check_paste_shortcut(keybind: &str) -> Result<()> {
+    parse_paste_shortcut(keybind).map(drop)
+}
+
 fn parse_paste_shortcut(keybind: &str) -> Result<PasteShortcut> {
     let invalid = || Error::Config(format!("\"{keybind}\" is not a paste keybind"));
     let lower = keybind.trim().to_ascii_lowercase();

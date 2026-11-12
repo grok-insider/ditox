@@ -1,7 +1,7 @@
 use base64::Engine;
 use ditox_rpc::{
     BLOB_MISSING, ENTRY_NOT_FOUND, Filter, Health, INVALID_PARAMS, INVALID_REQUEST, ImagePayload,
-    Kind, METHOD_NOT_FOUND, NOT_AN_IMAGE, PARSE_ERROR, PasteMode, Pulse, SERVER_ERROR,
+    Kind, METHOD_NOT_FOUND, NOT_AN_IMAGE, PARSE_ERROR, PasteMode, Pulse, SERVER_ERROR, Settings,
 };
 use serde_json::{Map, Value, json};
 
@@ -77,6 +77,7 @@ fn changes_history(method: &str) -> bool {
     !matches!(
         method,
         "health.check"
+            | "config.get"
             | "history.pulse"
             | "entries.list"
             | "entries.get"
@@ -97,6 +98,23 @@ fn dispatch(app: &mut App, method: &str, params: Option<&Value>) -> Reply {
                 version: VERSION.into(),
                 storage: "sqlite".into()
             }))
+        }
+        "config.get" => {
+            Params::none(params)?;
+            Ok(json!(app.config_view()))
+        }
+        "config.set" => {
+            let params = Params::new(params, &["settings"], &[])?;
+            let settings: Settings = params
+                .value("settings")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .ok_or_else(|| Failure::params("invalid settings"))?;
+            app.set_settings(&settings)
+                .map(|view| json!(view))
+                .map_err(|err| match err {
+                    crate::error::Error::Config(detail) => Failure::params(detail),
+                    other => other.into(),
+                })
         }
         "history.pulse" => {
             Params::none(params)?;
@@ -303,7 +321,7 @@ impl<'a> Params<'a> {
 
 #[cfg(test)]
 mod tests {
-    use ditox_rpc::{Entry, PasteResult};
+    use ditox_rpc::{ConfigView, Entry, PasteResult};
 
     use super::*;
     use crate::app::tests::{FakeDesktop, app};
@@ -324,7 +342,10 @@ mod tests {
     }
 
     fn error_code(app: &mut App, method: &str, params: Value) -> i64 {
-        call(app, method, params)["error"]["code"].as_i64().unwrap()
+        let response = call(app, method, params);
+        response["error"]["code"]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{method} answered {response}"))
     }
 
     #[test]
@@ -424,7 +445,7 @@ mod tests {
             "nothing.here",
             "entries.clear",
             "groups.create",
-            "config.get",
+            "stats.get",
         ] {
             assert_eq!(
                 error_code(&mut app, gone, json!({})),
@@ -447,6 +468,78 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(no_params["result"]["ok"], true);
+    }
+
+    #[test]
+    fn settings_are_read_saved_to_the_file_and_lived_by_at_once() {
+        let (dir, mut app) = app("rpc-config", FakeDesktop::default());
+        app.cfg.config_path = dir.path("config/ditox/config.toml");
+        for text in ["one", "two", "three"] {
+            app.store.add_text(&app.cfg, text).unwrap();
+        }
+
+        let before = app.revision();
+        let view: ConfigView =
+            serde_json::from_value(ok(&mut app, "config.get", json!({}))).unwrap();
+        assert!(view.writable);
+        assert_eq!(view.path, app.cfg.config_path);
+        assert_eq!(view.settings, app.cfg.settings());
+        assert_eq!(app.revision(), before);
+
+        let mut wanted = view.settings.clone();
+        wanted.max_entries = 2;
+        wanted.ui.lines = 3;
+        wanted.excluded_apps = vec!["Signal".into()];
+        let saved: ConfigView =
+            serde_json::from_value(ok(&mut app, "config.set", json!({ "settings": wanted })))
+                .unwrap();
+        assert_eq!(saved.settings, wanted);
+        assert_eq!(app.cfg.max_entries, 2);
+        assert_eq!(app.cfg.excluded_apps, ["Signal"]);
+        assert!(app.revision() > before);
+        let listed = ok(&mut app, "entries.list", json!({}))["entries"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(listed, 2);
+        let written = std::fs::read_to_string(&app.cfg.config_path).unwrap();
+        assert!(written.contains("max_entries = 2") && written.contains("lines = 3"));
+        assert_eq!(ditox_rpc::Ui::parse(&written).lines, 3);
+
+        let mut bad = wanted.clone();
+        bad.max_entries = 0;
+        bad.ui.lines = 5;
+        for params in [
+            json!({ "settings": bad }),
+            json!({ "settings": { "max_entries": 5 } }),
+            json!({ "settings": "all of them" }),
+            json!({}),
+        ] {
+            assert_eq!(
+                error_code(&mut app, "config.set", params.clone()),
+                INVALID_PARAMS,
+                "{params}"
+            );
+        }
+        assert_eq!(app.cfg.settings(), wanted);
+        assert_eq!(
+            std::fs::read_to_string(&app.cfg.config_path).unwrap(),
+            written
+        );
+
+        std::fs::remove_file(&app.cfg.config_path).unwrap();
+        std::fs::write(dir.path("store.toml"), "").unwrap();
+        std::os::unix::fs::symlink(dir.path("store.toml"), &app.cfg.config_path).unwrap();
+        let mut more = wanted.clone();
+        more.max_entries = 9;
+        assert_eq!(
+            error_code(&mut app, "config.set", json!({ "settings": more })),
+            INVALID_PARAMS
+        );
+        assert_eq!(app.cfg.max_entries, 2);
+        let view: ConfigView =
+            serde_json::from_value(ok(&mut app, "config.get", json!({}))).unwrap();
+        assert!(!view.writable);
     }
 
     #[test]

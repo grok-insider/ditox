@@ -24,7 +24,10 @@ use windows_sys::Win32::System::Console::{
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
-use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
+    SetProcessDpiAwarenessContext,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, EnumWindows, GetClientRect, GetCursorPos,
     GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
@@ -90,6 +93,17 @@ pub fn attach_console() {
             }
         }
     }
+}
+
+/// Ask Windows for true pixels from here on. Until a program says it knows
+/// about scaled screens, Windows answers it as if every screen were at
+/// 100 %: sizes come back divided by the scale and the scale as 1. The
+/// window's toolkit says so when it starts, which is after the list has
+/// worked out where to open. Call first in `main`.
+pub fn know_scaled_screens() {
+    // SAFETY: takes a constant. A program that already said so is refused
+    // and nothing else happens.
+    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
 
 /// Let another program take the keyboard from this one: the daemon, which

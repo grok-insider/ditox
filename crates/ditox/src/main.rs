@@ -83,7 +83,10 @@ fn active_window() -> Option<Window> {
 
 fn main() {
     #[cfg(windows)]
-    ditox_rpc::win::attach_console();
+    {
+        ditox_rpc::win::attach_console();
+        ditox_rpc::win::know_scaled_screens();
+    }
     startup::prepare();
     rune::set_app_id(APP_ID);
     match std::env::args().nth(1).as_deref() {

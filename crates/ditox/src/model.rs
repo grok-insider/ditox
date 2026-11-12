@@ -1,5 +1,20 @@
 use ditox_rpc::{Entry, Filter, Kind};
 
+/// How the daemon is started by hand: what the windows say when it is not
+/// running. Linux has a systemd user unit for it.
+pub const START_DAEMON: &str = if cfg!(windows) {
+    "ditoxd daemon"
+} else {
+    "systemctl --user start ditox"
+};
+
+/// What to do about a daemon older than its window.
+pub const RESTART_DAEMON: &str = if cfg!(windows) {
+    "end ditoxd, then run: ditoxd daemon"
+} else {
+    "systemctl --user restart ditox"
+};
+
 pub const PREVIEW_CHARS: usize = 6000;
 pub const PREVIEW_LINES: usize = 400;
 const TAB_COLUMNS: usize = 4;

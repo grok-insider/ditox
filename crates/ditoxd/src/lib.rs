@@ -12,6 +12,7 @@ pub mod rpc;
 pub mod server;
 pub mod storage;
 pub mod text;
+pub mod windows;
 
 #[cfg(test)]
 pub(crate) mod testing;

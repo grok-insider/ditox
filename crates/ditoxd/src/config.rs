@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use ditox_rpc::{MAX_LINES, MIN_LINES, Settings, Ui};
+use ditox_rpc::{MAX_LINES, MIN_LINES, Settings, Ui, dirs};
 use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
@@ -39,6 +39,29 @@ const DEFAULT_TERMINAL_APPS: [&str; 19] = [
     "st",
 ];
 
+/// The programs Windows runs terminals as: there a window's class is the
+/// name of its program.
+const WINDOWS_TERMINAL_APPS: [&str; 14] = [
+    "WindowsTerminal",
+    "OpenConsole",
+    "conhost",
+    "cmd",
+    "powershell",
+    "pwsh",
+    "wezterm-gui",
+    "alacritty",
+    "kitty",
+    "mintty",
+    "rio",
+    "warp",
+    "Tabby",
+    "Hyper",
+];
+
+/// The key that opens the list where the daemon listens for it itself. On
+/// Linux the compositor binds a key to `ditox`, so there is none.
+const DEFAULT_OPEN_KEYBIND: &str = if cfg!(windows) { "ctrl+alt+v" } else { "" };
+
 const DEFAULT_SECRET_PATTERNS: [&str; 12] = [
     "-----BEGIN PRIVATE KEY-----",
     "-----BEGIN OPENSSH PRIVATE KEY-----",
@@ -70,6 +93,8 @@ pub struct Config {
     pub paste_keybind: String,
     pub terminal_paste_keybind: String,
     pub terminal_apps: Vec<String>,
+    /// The key the daemon listens for to open the list; empty for none.
+    pub open_keybind: String,
     pub max_preview_chars: u32,
     pub excluded_apps: Vec<String>,
     pub excluded_windows: Vec<String>,
@@ -88,24 +113,63 @@ struct Homes {
     data: String,
 }
 
+/// `parts` under `base`, joined as this system joins paths.
+fn under(base: &str, parts: &[&str]) -> String {
+    let mut path = std::path::PathBuf::from(base);
+    path.extend(parts);
+    path.to_string_lossy().into_owned()
+}
+
+fn default_terminal_apps() -> Vec<String> {
+    if cfg!(windows) {
+        WINDOWS_TERMINAL_APPS.map(String::from).to_vec()
+    } else {
+        DEFAULT_TERMINAL_APPS.map(String::from).to_vec()
+    }
+}
+
+/// Whether `keybind` names a shortcut this system's desktop can be asked to
+/// send.
+fn check_paste_shortcut(keybind: &str) -> Result<()> {
+    #[cfg(windows)]
+    return crate::windows::desktop::check_paste_shortcut(keybind);
+    #[cfg(not(windows))]
+    crate::hyprland::check_paste_shortcut(keybind)
+}
+
+#[cfg(unix)]
+fn can_write(path: &Path) -> bool {
+    std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        // SAFETY: `access` reads the path it is given and keeps nothing.
+        .is_ok_and(|path| unsafe { libc::access(path.as_ptr(), libc::W_OK) } == 0)
+}
+
+#[cfg(windows)]
+fn can_write(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|meta| !meta.permissions().readonly())
+}
+
 impl Config {
     pub fn load() -> Result<Config> {
         Self::load_with(&|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
     }
 
     pub fn load_with(env: &dyn Fn(&str) -> Option<String>) -> Result<Config> {
-        let home = env("HOME").unwrap_or_else(|| ".".into());
-        let homes = Homes {
-            config: env("XDG_CONFIG_HOME").unwrap_or_else(|| format!("{home}/.config")),
-            data: env("XDG_DATA_HOME").unwrap_or_else(|| format!("{home}/.local/share")),
-            home,
+        let text = |dir: Option<std::path::PathBuf>| {
+            dir.map_or_else(|| ".".into(), |dir| dir.to_string_lossy().into_owned())
         };
-        let data_dir = env("DITOX_DATA_DIR").unwrap_or_else(|| format!("{}/ditox", homes.data));
+        let homes = Homes {
+            config: text(dirs::config_home(env)),
+            data: text(dirs::data_home(env)),
+            home: text(dirs::home(env)),
+        };
+        let data_dir = env("DITOX_DATA_DIR").unwrap_or_else(|| under(&homes.data, &["ditox"]));
         let mut config = Config {
             config_path: env("DITOX_CONFIG")
-                .unwrap_or_else(|| format!("{}/ditox/config.toml", homes.config)),
-            db_path: env("DITOX_DB").unwrap_or_else(|| format!("{data_dir}/ditox-v2.db")),
-            image_dir: format!("{data_dir}/images-v2"),
+                .unwrap_or_else(|| under(&homes.config, &["ditox", "config.toml"])),
+            db_path: env("DITOX_DB").unwrap_or_else(|| under(&data_dir, &["ditox-v2.db"])),
+            image_dir: under(&data_dir, &["images-v2"]),
             paste_keybind: env("DITOX_AUTO_PASTE_KEYBIND").unwrap_or_else(|| "ctrl+v".into()),
             ..Config::defaults(&data_dir)
         };
@@ -131,8 +195,8 @@ impl Config {
         Config {
             config_path: "config.toml".into(),
             data_dir: data_dir.into(),
-            db_path: format!("{data_dir}/ditox-v2.db"),
-            image_dir: format!("{data_dir}/images-v2"),
+            db_path: under(data_dir, &["ditox-v2.db"]),
+            image_dir: under(data_dir, &["images-v2"]),
             max_entries: 1000,
             max_image_bytes: 128 * 1024 * 1024,
             max_text_bytes: 256 * 1024,
@@ -142,7 +206,8 @@ impl Config {
             paste_buffer_ms: 120,
             paste_keybind: "ctrl+v".into(),
             terminal_paste_keybind: "ctrl+shift+v".into(),
-            terminal_apps: DEFAULT_TERMINAL_APPS.map(String::from).to_vec(),
+            terminal_apps: default_terminal_apps(),
+            open_keybind: DEFAULT_OPEN_KEYBIND.into(),
             max_preview_chars: 160,
             excluded_apps: DEFAULT_EXCLUDED_APPS.map(String::from).to_vec(),
             excluded_windows: Vec::new(),
@@ -162,6 +227,7 @@ impl Config {
             paste_keybind: self.paste_keybind.clone(),
             terminal_paste_keybind: self.terminal_paste_keybind.clone(),
             terminal_apps: self.terminal_apps.clone(),
+            open_keybind: self.open_keybind.clone(),
             excluded_apps: self.excluded_apps.clone(),
             excluded_windows: self.excluded_windows.clone(),
             secret_patterns: self.secret_patterns.clone(),
@@ -183,7 +249,13 @@ impl Config {
             )));
         }
         for keybind in [&settings.paste_keybind, &settings.terminal_paste_keybind] {
-            crate::hyprland::check_paste_shortcut(keybind)?;
+            check_paste_shortcut(keybind)?;
+        }
+        let open_keybind = settings.open_keybind.trim();
+        if !open_keybind.is_empty() && crate::windows::format::chord(open_keybind).is_none() {
+            return Err(Error::Config(format!(
+                "\"{open_keybind}\" is not a key that can open Ditox"
+            )));
         }
         let list = |items: &[String]| -> Result<Vec<String>> {
             let items: Vec<String> = items
@@ -215,6 +287,7 @@ impl Config {
         self.paste_keybind = settings.paste_keybind.trim().to_string();
         self.terminal_paste_keybind = settings.terminal_paste_keybind.trim().to_string();
         self.terminal_apps = terminal_apps;
+        self.open_keybind = open_keybind.to_string();
         self.excluded_apps = excluded_apps;
         self.excluded_windows = excluded_windows;
         self.secret_patterns = secret_patterns;
@@ -276,6 +349,9 @@ impl Config {
         out.push_str(&format!("theme = {}\n", quoted(self.ui.theme.as_str())));
         out.push_str(&format!("lines = {}\n", self.ui.lines));
         out.push_str(&format!("close_on_blur = {}\n", self.ui.close_on_blur));
+        if self.open_keybind != DEFAULT_OPEN_KEYBIND {
+            out.push_str(&format!("open_keybind = {}\n", quoted(&self.open_keybind)));
+        }
         out.push_str(&format!("max_preview_chars = {}\n", self.max_preview_chars));
         out
     }
@@ -293,11 +369,7 @@ impl Config {
         let existing = path
             .ancestors()
             .find(|candidate| !candidate.as_os_str().is_empty() && candidate.exists());
-        existing.is_some_and(|existing| {
-            std::ffi::CString::new(existing.as_os_str().as_encoded_bytes())
-                // SAFETY: `access` reads the path it is given and keeps nothing.
-                .is_ok_and(|path| unsafe { libc::access(path.as_ptr(), libc::W_OK) } == 0)
-        })
+        existing.is_some_and(can_write)
     }
 
     /// Writes the config file whole, beside itself first, then in its place.
@@ -399,10 +471,13 @@ impl Config {
                 self.apply_json(nested, homes);
             }
         }
-        if let Some(Value::Object(ui)) = object.get("ui")
-            && let Some(value) = number(ui, &["max_preview_chars", "maxEntryLength"])
-        {
-            self.max_preview_chars = value;
+        if let Some(Value::Object(ui)) = object.get("ui") {
+            if let Some(value) = number(ui, &["max_preview_chars", "maxEntryLength"]) {
+                self.max_preview_chars = value;
+            }
+            if let Some(value) = string(ui, &["open_keybind", "openKeybind"]) {
+                self.open_keybind = value.to_string();
+            }
         }
     }
 
@@ -449,11 +524,13 @@ impl Config {
                     }
                     _ => {}
                 },
-                "ui" => {
-                    if key == "max_preview_chars" || key == "maxEntryLength" {
-                        self.max_preview_chars = parse_u32(value, self.max_preview_chars);
+                "ui" => match key {
+                    "max_preview_chars" | "maxEntryLength" => {
+                        self.max_preview_chars = parse_u32(value, self.max_preview_chars)
                     }
-                }
+                    "open_keybind" | "openKeybind" => self.open_keybind = unquoted(value),
+                    _ => {}
+                },
                 "capture" => self.apply_capture(key, value),
                 _ => {}
             }
@@ -537,7 +614,7 @@ fn strings(object: &Map<String, Value>, keys: &[&str]) -> Option<Vec<String>> {
 }
 
 fn resolve_path(config_path: &str, raw: &str, homes: &Homes) -> String {
-    if raw.starts_with('/') {
+    if raw.starts_with('/') || Path::new(raw).is_absolute() {
         return raw.to_string();
     }
     if raw == "~" {
@@ -693,6 +770,15 @@ fn parse_bool(value: &str, fallback: bool) -> bool {
 mod tests {
     use super::*;
 
+    /// A path the file names without a directory: beside the config file,
+    /// joined as this system joins paths.
+    fn beside_the_config(name: &str) -> String {
+        Path::new("/etc/ditox")
+            .join(name)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn homes() -> Homes {
         Homes {
             home: "/home/tester".into(),
@@ -708,6 +794,44 @@ mod tests {
         };
         config.apply_file(text, &homes());
         config
+    }
+
+    #[test]
+    fn the_key_that_opens_the_list_is_checked_kept_and_read_back() {
+        let mut config = applied("");
+        assert_eq!(config.open_keybind, DEFAULT_OPEN_KEYBIND);
+        assert!(
+            !config.render().contains("open_keybind"),
+            "the default is not written"
+        );
+
+        let mut settings = config.settings();
+        settings.open_keybind = " ctrl+shift+space ".into();
+        config.apply_settings(&settings).unwrap();
+        assert_eq!(config.open_keybind, "ctrl+shift+space");
+        assert_eq!(applied(&config.render()).open_keybind, "ctrl+shift+space");
+
+        settings.open_keybind = "ctrl+".into();
+        assert!(
+            config
+                .apply_settings(&settings)
+                .unwrap_err()
+                .to_string()
+                .contains("\"ctrl+\" is not a key that can open Ditox")
+        );
+        assert_eq!(
+            config.open_keybind, "ctrl+shift+space",
+            "a refusal changes nothing"
+        );
+
+        // No key at all is a choice, and survives the file.
+        settings.open_keybind = String::new();
+        config.apply_settings(&settings).unwrap();
+        assert_eq!(applied(&config.render()).open_keybind, "");
+        assert_eq!(
+            applied(r#"{"ui": {"openKeybind": "super+f9"}}"#).open_keybind,
+            "super+f9"
+        );
     }
 
     #[test]
@@ -892,14 +1016,15 @@ secret_patterns = ["AKIA[A-Z0-9]{16}", "#token", "tab\there"]
         let target = root.join("store.toml");
         std::fs::write(&target, "[history]\nmax_entries = 3\n").unwrap();
         std::fs::remove_file(&path).unwrap();
-        std::os::unix::fs::symlink(&target, &path).unwrap();
-        assert!(!config.writable());
-        assert!(config.save().is_err());
-        assert!(
-            std::fs::read_to_string(&target)
-                .unwrap()
-                .contains("max_entries = 3")
-        );
+        if crate::testing::link(&target, &path) {
+            assert!(!config.writable());
+            assert!(config.save().is_err());
+            assert!(
+                std::fs::read_to_string(&target)
+                    .unwrap()
+                    .contains("max_entries = 3")
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -912,7 +1037,7 @@ secret_patterns = ["AKIA[A-Z0-9]{16}", "#token", "tab\there"]
         assert_eq!(config.delete_after_seconds, 30);
         assert!(config.allow_duplicates);
         assert_eq!(config.max_preview_chars, 55);
-        assert_eq!(config.db_path, "/etc/ditox/history.db");
+        assert_eq!(config.db_path, beside_the_config("history.db"));
         assert_eq!(config.image_dir, "/home/tester/clips");
         assert_eq!(config.excluded_apps, ["Signal"]);
     }
@@ -954,7 +1079,16 @@ secret_patterns = ["AKIA[A-Z0-9]{16}", "#token", "tab\there"]
         assert_eq!(resolve("${HOME}/x"), "/home/tester/x");
         assert_eq!(resolve("${XDG_CONFIG_HOME}/x"), "/home/tester/.config/x");
         assert_eq!(resolve("$XDG_DATA_HOME/x"), "/home/tester/.local/share/x");
-        assert_eq!(resolve("relative/x"), "/etc/ditox/relative/x");
+        assert_eq!(resolve("relative/x"), beside_the_config("relative/x"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_with_a_drive_is_taken_as_written() {
+        let homes = homes();
+        let resolve = |raw: &str| resolve_path("C:\\Users\\u\\ditox\\config.toml", raw, &homes);
+        assert_eq!(resolve("D:\\clips\\old.db"), "D:\\clips\\old.db");
+        assert_eq!(resolve("old.db"), "C:\\Users\\u\\ditox\\old.db");
     }
 
     #[test]
@@ -999,8 +1133,8 @@ secret_patterns = ["AKIA[A-Z0-9]{16}", "#token", "tab\there"]
         .unwrap();
         assert_eq!(config.max_entries, 5);
         assert_eq!(
-            config.db_path,
-            format!("{}/ditox/ditox-v2.db", data_home.display())
+            Path::new(&config.db_path),
+            data_home.join("ditox").join("ditox-v2.db")
         );
         assert!(Path::new(&config.image_dir).is_dir());
         let _ = std::fs::remove_dir_all(&root);

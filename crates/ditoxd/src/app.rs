@@ -125,7 +125,7 @@ impl App {
         Ok(WatcherStatus {
             running: self.watch_running,
             paused: self.store.is_watcher_paused()?,
-            backend: "wl-clipboard".into(),
+            backend: crate::clipboard::BACKEND.into(),
             last_error: self.store.watcher_last_error()?,
         })
     }
@@ -649,6 +649,7 @@ pub(crate) mod tests {
                 ..Default::default()
             },
         );
+        app.cfg.terminal_apps = vec!["ghostty".into()];
         let id = app.store.add_text(&app.cfg, "ls -la").unwrap();
         assert!(
             app.paste(id, Some("0xabc"), PasteMode::Original)

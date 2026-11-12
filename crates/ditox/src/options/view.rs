@@ -133,7 +133,7 @@ fn page(state: &State, p: &Palette) -> El {
                         .self_start()
                         .fill(p.well)
                         .child(
-                            text("systemctl --user start ditox")
+                            text(crate::model::START_DAEMON)
                                 .font(theme::CODE)
                                 .color(p.ink),
                         ),
@@ -159,7 +159,7 @@ fn page(state: &State, p: &Palette) -> El {
         page
     };
     match state.tab {
-        Tab::General => page
+        Tab::General => opening_key(page, state, p)
             .child(setting(
                 "Clips to keep",
                 "The oldest go first. Pinned clips stay.",
@@ -335,6 +335,28 @@ fn page(state: &State, p: &Palette) -> El {
 }
 
 /// A label, the line under it, and the control at the end of the row.
+/// The key that opens the list, first on its page. Only where the daemon is
+/// what listens for it: on Linux the compositor binds a key to `ditox`.
+fn opening_key(page: El, state: &State, p: &Palette) -> El {
+    if !cfg!(windows) {
+        return page;
+    }
+    page.child(setting(
+        "Key that opens Ditox",
+        "Pressed anywhere. Empty for none.",
+        field(
+            "open-keybind",
+            &state.open_keybind,
+            SHORTCUT_WIDTH,
+            "Key that opens Ditox",
+            |state| &mut state.open_keybind,
+            p,
+        ),
+        p,
+    ))
+    .child(rule(p))
+}
+
 fn setting(label: &'static str, hint: &'static str, control: El, p: &Palette) -> El {
     let mut words = col()
         .grow(1.0)

@@ -1,10 +1,10 @@
 # Ditox
 
-Ditox is a clipboard manager for Linux/Wayland (first target: Hyprland). It is written in Rust.
+Ditox is a clipboard manager for Linux/Wayland (first target: Hyprland) and for Windows 10 and 11. It is written in Rust, and it is the same program on both.
 
 - **`ditoxd`** owns the clipboard, the SQLite history, image files, and paste-back.
 - **`ditox`** is the window, built with [Rune](https://github.com/anomalyco/rune): a list of clips with a search field under it. `ditox options` is a second window for the settings.
-- They talk JSON-RPC 2.0 over `$XDG_RUNTIME_DIR/ditox/rpc.sock`. The window never opens the database.
+- They talk JSON-RPC 2.0 over a Unix socket: `$XDG_RUNTIME_DIR/ditox/rpc.sock`, or `%LOCALAPPDATA%\ditox\rpc.sock` on Windows. The window never opens the database.
 
 ## Install
 
@@ -98,6 +98,26 @@ Save asks the daemon to check the settings, write `config.toml` and live by them
 
 The window loads only the Vulkan driver of the GPU that drives a screen, and keeps pictures at the size it draws them: a row's picture is a few thousand pixels. On an NVIDIA desktop it opens at about 110 MB resident, of which about 80 MB is the driver's own libraries, shared with every other program that draws with the GPU. If the window cannot open with the driver it picked, it starts again with all of them. `DITOX_ALL_GPU_DRIVERS=1`, or any of the Vulkan loader's own `VK_*` driver variables, turns the choice off.
 
+### Windows
+
+Put `ditox.exe` and `ditoxd.exe` in the same folder, then:
+
+```bat
+ditoxd install
+ditoxd daemon
+```
+
+`install` starts the daemon with every session from then on (the user's `Run` key; `ditoxd uninstall` takes it back), and the second line starts it now. The daemon listens for the key that opens the list itself: `Ctrl+Alt+V` until you change it in the options or in `[ui] open_keybind`. Pressed again while the list is open, it puts it away.
+
+Nothing else is needed: the daemon reads and writes the Windows clipboard, finds the window that has the keyboard, and presses the paste shortcut. What differs from Linux:
+
+- A window is known by the program that owns it, without `.exe`: `excluded_apps` and `terminal_apps` take names such as `KeePassXC` or `WindowsTerminal`. The default terminals are the Windows ones.
+- A clip a program marks as private (`ExcludeClipboardContentFromMonitorProcessing`, or `CanIncludeInClipboardHistory` set to 0, as password managers do) is not stored.
+- A screenshot or a copied picture is kept as a PNG; pasted back it is offered as that file and as a bitmap. A bare bitmap beside plain text (spreadsheet cells) is taken as the text.
+- Files copied in Explorer are kept as their `file:` addresses and pasted back as files.
+- The list opens where it was left on the screen the pointer is on, in the middle the first time.
+- Windows does not let a program type into a window that runs as administrator unless it does too.
+
 ## Upgrading from 0.1
 
 The history and the config are the same files. On its first start the 0.2 daemon:
@@ -112,6 +132,8 @@ To go back to 0.1, stop `ditoxd` and put that copy in place of `ditox-v2.db`. Th
 - Database: `~/.local/share/ditox/ditox-v2.db`
 - Images: `~/.local/share/ditox/images-v2/`
 - Config: `~/.config/ditox/config.toml` (`DITOX_CONFIG` overrides)
+
+On Windows the database and the images are under `%LOCALAPPDATA%\ditox\` and the config is `%APPDATA%\ditox\config.toml`. The `XDG_*` variables are followed there too when they are set.
 
 ```toml
 [history]
@@ -136,6 +158,7 @@ secret_patterns = ["ghp_", "AKIA[A-Z0-9]{16}"]
 theme = "system"            # or "dark", "light"
 lines = 2                   # lines of each clip in the list, 1 to 5
 close_on_blur = true        # the list closes when another window takes the keyboard
+open_keybind = "ctrl+alt+v" # Windows: the key the daemon listens for to open the list; "" for none
 ```
 
 A string is in double quotes; `\"` and `\\` stand for a quote and a backslash inside one. An array is on one line.
@@ -153,6 +176,8 @@ cargo run -p ditox -- options --snap /tmp/options.png --scene general
 ```
 
 Rune is pinned in `crates/ditox/Cargo.toml`. Headless snapshots (`--snap`) need Vulkan.
+
+On Windows a stable Rust toolchain is enough: `cargo test --workspace` and `cargo build --release`. From Linux, `cargo xwin build --target x86_64-pc-windows-msvc` builds both programs, and `cargo xwin test --no-run` the test programs to run there.
 
 To try the daemon without touching your clipboard or history:
 

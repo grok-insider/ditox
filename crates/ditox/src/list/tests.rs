@@ -1824,7 +1824,7 @@ fn every_empty_state_says_what_happened() {
     deliver(&mut offline, feed::Event::Offline("no socket".into()));
     for needle in [
         "The daemon is not running",
-        "systemctl --user start ditox",
+        crate::model::START_DAEMON,
         "no socket",
     ] {
         assert!(says(&offline, needle), "{needle}");

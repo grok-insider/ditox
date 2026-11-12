@@ -43,6 +43,7 @@ pub fn prepare() {
 /// Starts the program again with every Vulkan driver allowed, when this run
 /// had picked some and the window could not open with them. Returns when
 /// there is nothing more to try.
+#[cfg(unix)]
 pub fn retry_with_every_driver() {
     use std::os::unix::process::CommandExt;
     if !PICKED.load(Ordering::Relaxed) {
@@ -58,6 +59,10 @@ pub fn retry_with_every_driver() {
         .exec();
     eprintln!("ditox: could not start again: {failed}");
 }
+
+/// Windows draws through Direct3D: no driver was picked, so none is given up.
+#[cfg(not(unix))]
+pub fn retry_with_every_driver() {}
 
 /// The Vulkan drivers worth loading, as the loader's `VK_LOADER_DRIVERS_SELECT`
 /// reads them. Left alone, the loader opens every driver installed: on a
@@ -195,6 +200,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn cards_are_read_from_the_drm_directory() {
         let root = std::env::temp_dir().join(format!("ditox-drm-{}", std::process::id()));

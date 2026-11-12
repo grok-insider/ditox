@@ -7,7 +7,7 @@ Guidance for AI coding agents working in this repository.
 
 ## What Ditox is
 
-A clipboard manager for Linux/Wayland, in Rust. One Cargo workspace, two binaries:
+A clipboard manager for Linux/Wayland and for Windows, in Rust. One Cargo workspace, two binaries, the same on both systems:
 
 - **`ditoxd`** (`crates/ditoxd`): clipboard, SQLite, image files, watcher, config, paste-back, JSON-RPC.
 - **`ditox`** (`crates/ditox`, Rune): the only interface. Two windows, one at a time: the clip list, and `ditox options`. Neither opens SQLite.
@@ -19,7 +19,7 @@ ditox options  (the settings) --JSON-RPC-->    storage · clipboard · watcher �
                                                SQLite + image files + config.toml
 ```
 
-The socket is `$XDG_RUNTIME_DIR/ditox/rpc.sock` (Content-Length framed JSON-RPC 2.0, mode 0600).
+The socket is `$XDG_RUNTIME_DIR/ditox/rpc.sock` (Content-Length framed JSON-RPC 2.0, mode 0600). On Windows it is a Unix socket too, `%LOCALAPPDATA%\ditox\rpc.sock`, private because that folder is its user's.
 
 ## Build and test
 
@@ -30,6 +30,8 @@ cargo clippy --workspace --all-targets
 ```
 
 `nix build` builds the workspace, runs its tests, and ships `bin/ditox` and `bin/ditoxd` together. Home Manager starts `ditoxd daemon`.
+
+For Windows, from Linux: `cargo xwin clippy --target x86_64-pc-windows-msvc --workspace --all-targets`, `cargo xwin build --release --target x86_64-pc-windows-msvc`, and `cargo xwin test --no-run --target x86_64-pc-windows-msvc` for the test programs, which are then run on Windows (the `win11-qa` guest on the station). CI runs `cargo test --workspace` on Windows. A change to anything outside `windows/`, `win.rs` and `clipboard/wl.rs` must build and pass on both.
 
 Headless UI check (needs Vulkan):
 
@@ -47,7 +49,9 @@ The window tests (`list/tests.rs`, `options/tests.rs`) run the real views in Run
 ## Layout
 
 ```text
-crates/ditox-rpc/   types.rs, settings.rs, frame.rs, client.rs, hypr.rs (Hyprland's request socket)
+crates/ditox-rpc/   types.rs, settings.rs, frame.rs, client.rs, hypr.rs (Hyprland's request socket),
+                    sock.rs (the socket type of each system), dirs.rs (where a user's files go),
+                    win.rs (the Windows desktop: the window with the keyboard, screens, the console)
 crates/ditoxd/      the daemon
 crates/ditox/       the window
 docs/               ROADMAP, TODO
@@ -59,12 +63,13 @@ flake.nix           package, devShell, homeManagerModules
 | Module | Purpose |
 |--------|---------|
 | `main.rs` | `daemon`, `ingest wake`, `ingest text`, `ingest image` |
-| `server.rs` | Socket, one thread per client, the single loop that owns the store, the `wl-paste --watch` child |
+| `server.rs` | Socket, one thread per client, the single loop that owns the store, and the `Watcher` it keeps running: the `wl-paste --watch` child, or the Windows listener |
 | `rpc.rs` | Method table and parameter checks |
 | `app.rs` | Capture, paste, copy; the `Desktop` trait |
 | `storage.rs` | SQLite, FTS, retention, prune queue, migrations |
 | `blob.rs` | Content-addressed image files |
-| `clipboard.rs` | `wl-paste` and `wl-copy`, or a file with `DITOX_CLIPBOARD_MOCK` |
+| `clipboard.rs` | The clipboard by MIME type: `clipboard/wl.rs` (`wl-paste` and `wl-copy`) on Linux, `windows/clipboard.rs` on Windows, or a file with `DITOX_CLIPBOARD_MOCK` |
+| `windows/` | The Windows system. `format.rs`: what its clipboard holds turned into MIME offers and back, and keybinds into key numbers (pure, tested everywhere). `clipboard.rs`: the clipboard through Win32. `desktop.rs`: the `Desktop` there, with `SendInput` for the paste shortcut. `listener.rs`: the thread Windows tells of clipboard changes and of the key that opens the list. `autostart.rs`: `ditoxd install` |
 | `hyprland.rs` | Active window, the class of a window, and the paste shortcut: 0.57 Lua dispatch and the earlier syntax, over Hyprland's socket or `hyprctl` |
 | `policy.rs` | What may be stored or pasted. Pure. |
 | `config.rs` | TOML and JSON config: read, checked (`apply_settings`) and written back (`render`, `save`) |
@@ -88,7 +93,7 @@ Every request runs on one thread, in order. A `clipboard.wake` asks for a captur
 | `feed.rs` | The list's background thread that talks to the daemon |
 | `picture.rs` | The threads that decode pictures: one for the clip seen whole, one for the rows |
 | `overlay.rs` | A picture shown large on the screen through the hypr-overlay plugin, and the thread that asks for it |
-| `place.rs` | Where the list opens and how large: read from Hyprland as it closes, asked of Hyprland as it opens |
+| `place.rs` | Where the list opens and how large: read from Hyprland as it closes, asked of Hyprland as it opens. On Windows the window places itself (`opening`) and asks Windows where it is (`remember`) |
 | `startup.rs` | Before the window: which Vulkan drivers load, how freed memory is returned |
 | `fixture.rs` | Snapshot scenes |
 
@@ -111,6 +116,19 @@ While a `stay_focused` window is on screen Hyprland gives it every pointer event
 The menu is drawn in the window (Rune has no native pop-up menu on Linux). Its entries are data (`State::menu_items`): the view draws them, the keyboard walks them and `choose` runs one. While it is open the keyboard is the menu's. The pointer only tints the entry it is over, as on the list's rows, and a press runs that entry: the entry Enter runs (`Menu::at`) moves with the keys alone, so a menu that opens under a resting pointer, as after a right click, still starts on its first entry. While the menu is open the list and the strip under it are `inert` (`behind_the_menu`): Rune tints every element the pointer is inside, drawn over or not, so a row under the menu lit up as the pointer crossed the entry above it.
 
 The options window loads the settings once (`config.get`), keeps what the user types, and on Save sends all of them (`config.set`). The daemon checks them, writes the file, and only then lives by them; a refusal comes back as a sentence under the fields. The list never asks the daemon for settings: it reads the `[ui]` section of the file before its first frame (`ditox_rpc::Ui::load`), so the theme is right from the first pixel.
+
+### The Windows system
+
+Nothing above the platform modules knows which system it runs on. The daemon's `Desktop` and `Watcher` traits and the clipboard's three functions (`list`, `read`, `write`) are what each system fills in; the window asks `ditox_rpc::win` where Linux asks `ditox_rpc::hypr`.
+
+- The clipboard is offered as MIME types, as on Wayland. `CF_UNICODETEXT` is `text/plain`, the `HTML Format` `text/html` (its fragment), `CF_HDROP` a `text/uri-list` of `file:` addresses, the `PNG` and `JFIF` formats the images as they are. A bitmap with nothing better beside it is turned into a PNG; a bitmap beside plain text is the picture a program adds to its text, and is not offered. A stored image goes back under its own format and as a 24-bit bitmap on white.
+- A content its program marked private (`ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory` 0) offers nothing: `list` says so, where Wayland says it with `CLIPBOARD_STATE`.
+- The listener does not open the clipboard when Windows says it changed. A program fills the clipboard in steps and must open it for each; a reader in between makes the copy fail. The capture runs 150 ms after the last change there (40 ms on Linux), 600 ms after the first at most.
+- A window's address is its handle in hexadecimal and its class the program that owns it, without `.exe`.
+- Paste: the list has the keyboard while it asks. It lets the daemon move it (`AllowSetForegroundWindow`) before the request; the daemon gives the keyboard to the target, waits for modifiers still held from choosing the clip, lifts any that stay, and presses the shortcut with `SendInput`. A target that is gone or does not take the keyboard is the same `PasteBack` error as on Hyprland.
+- The key that opens the list is the daemon's (`[ui] open_keybind`, `RegisterHotKey`): it starts the `ditox.exe` beside it. The listener is shown the settings every tick and registers the key again when it changed. A key another program has is a watcher error. On Linux the setting is kept and does nothing: the compositor binds the key.
+- Both programs are built for the Windows desktop, so neither opens a console. Started from one they borrow it (`win::attach_console`), which is how `--version`, the usage and `--snap` statistics are read.
+- The list takes its place from `list.json` as on Linux, in points from the corner of what the taskbar leaves of the screen. It is read from the window's corner and the size of its content: read from the window's whole frame, it would grow a border every time it closed.
 
 ### Memory
 
@@ -159,6 +177,8 @@ Both windows take their looks from Fabrials UI 0.11 (`libs/fabrials-ui/DESIGN.md
 - The daemon is the only writer of `config.toml`. It takes settings whole or not at all, writes the file beside itself and renames it, and refuses a file that is a link. What `render` writes, `apply_file` reads back to the same config: a test holds the two together.
 - A string in the config is read with its quotes: a comma, a `#` or a bracket inside one is text.
 - A window that cannot open exits. Rune would keep the process alive without one.
+- The Windows clipboard is never opened in answer to a change notice, only by the capture once the changes stop, and never held open across anything but one read or one write.
+- Code for one system lives in `clipboard/wl.rs`, `hyprland.rs`, `windows/`, `ditox_rpc::hypr` and `ditox_rpc::win`, or behind a `cfg` on one item elsewhere. What is pure (formats, key numbers, placements) is compiled and tested on every system.
 
 ## RPC
 
@@ -169,6 +189,8 @@ The method table is `crates/ditoxd/src/rpc.rs`: `health.check`, `config.get`, `c
 - `~/.local/share/ditox/ditox-v2.db`
 - `~/.local/share/ditox/images-v2/`
 - `~/.config/ditox/config.toml`
+
+On Windows: `%LOCALAPPDATA%\ditox\` for the first two and `list.json`, `%APPDATA%\ditox\config.toml` (`ditox_rpc::dirs`). The `XDG_*` variables win on both systems.
 
 Tests use temporary directories. To run the daemon by hand, set `DITOX_DATA_DIR`, `DITOX_SOCKET` and `DITOX_CLIPBOARD_MOCK` (see the README). Do not point a development daemon at the real database.
 

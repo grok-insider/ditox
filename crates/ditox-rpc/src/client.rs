@@ -1,5 +1,4 @@
 use std::fmt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -7,8 +6,10 @@ use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::dirs;
 use crate::frame::{FrameReader, write_frame};
 use crate::settings::{ConfigView, Settings};
+use crate::sock::UnixStream;
 use crate::types::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,14 +30,22 @@ impl fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
-/// `DITOX_SOCKET`, else `$XDG_RUNTIME_DIR/ditox/rpc.sock`. There is no
-/// fallback to a shared directory.
+/// `DITOX_SOCKET`, else `ditox/rpc.sock` under `$XDG_RUNTIME_DIR`, or under
+/// `%LOCALAPPDATA%` on Windows. There is no fallback to a shared directory.
 pub fn socket_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("DITOX_SOCKET").filter(|path| !path.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|path| !path.is_empty())?;
-    Some(PathBuf::from(runtime).join("ditox/rpc.sock"))
+    Some(
+        dirs::runtime_dir(&dirs::process_env)?
+            .join("ditox")
+            .join("rpc.sock"),
+    )
+}
+
+/// What to say when [`socket_path`] has nowhere to put the socket.
+pub fn no_socket_path() -> String {
+    format!("{} is not set", dirs::RUNTIME_VARIABLE)
 }
 
 pub struct Client {
@@ -47,8 +56,7 @@ pub struct Client {
 
 impl Client {
     pub fn connect() -> Result<Self, RpcError> {
-        let path = socket_path()
-            .ok_or_else(|| RpcError::Transport("XDG_RUNTIME_DIR is not set".into()))?;
+        let path = socket_path().ok_or_else(|| RpcError::Transport(no_socket_path()))?;
         Self::connect_to(&path)
     }
 

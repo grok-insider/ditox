@@ -7,6 +7,10 @@
 //! where it ended up and writes that down, measured from the corner of the
 //! screen it was on: the next time it opens there on whichever screen has the
 //! keyboard. Elsewhere only the size is kept.
+//!
+//! A Windows window places itself. There the list opens where it was left on
+//! the screen the pointer is on, in the middle the first time, and asks
+//! Windows where it is as it closes.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -82,17 +86,18 @@ impl Placement {
     }
 }
 
-/// `DITOX_STATE`, else `ditox/list.json` under `XDG_STATE_HOME` or `~/.local/state`.
+/// `DITOX_STATE`, else `ditox/list.json` under `XDG_STATE_HOME`,
+/// `~/.local/state`, or `%LOCALAPPDATA%` on Windows.
 pub fn state_path() -> Option<PathBuf> {
-    let env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-    if let Some(path) = env("DITOX_STATE") {
+    use ditox_rpc::dirs;
+    if let Some(path) = dirs::process_env("DITOX_STATE") {
         return Some(PathBuf::from(path));
     }
-    let base = match env("XDG_STATE_HOME") {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(env("HOME")?).join(".local/state"),
-    };
-    Some(base.join("ditox/list.json"))
+    Some(
+        dirs::state_home(&dirs::process_env)?
+            .join("ditox")
+            .join("list.json"),
+    )
 }
 
 pub fn load_from(path: &Path) -> Option<Placement> {
@@ -195,6 +200,7 @@ pub fn window_of(clients: &[u8], pid: i64) -> Option<Seen> {
 
 /// Where a window Hyprland shows is, measured on its own screen and kept
 /// inside it. A window that is tiled or fullscreen was not put where it is.
+#[cfg(any(not(windows), test))]
 pub fn seen_on_its_screen(
     seen: &Seen,
     screens: &[(i64, bool, Screen)],
@@ -212,8 +218,121 @@ pub fn seen_on_its_screen(
     })
 }
 
+/// What Windows calls a screen: the part of it the taskbar leaves, in desktop
+/// pixels, and how many pixels a point is there.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pixels {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub scale: f64,
+}
+
+#[cfg(any(windows, test))]
+impl Pixels {
+    /// The same screen in points, with nothing more kept for bars.
+    fn screen(&self) -> Screen {
+        let points = |pixels: i32| (f64::from(pixels) / self.scale) as i32;
+        Screen {
+            x: 0,
+            y: 0,
+            width: points(self.width),
+            height: points(self.height),
+            reserved: [0; 4],
+        }
+    }
+}
+
+/// A window whose corner is at `at` and whose content is `size`, both in
+/// desktop pixels, as a placement on `screen`.
+#[cfg(any(windows, test))]
+pub fn from_pixels(
+    at: (i32, i32),
+    size: (i32, i32),
+    screen: &Pixels,
+    min: (i32, i32),
+) -> Placement {
+    let points = |pixels: i32| (f64::from(pixels) / screen.scale).round() as i32;
+    Placement {
+        x: points(at.0 - screen.x),
+        y: points(at.1 - screen.y),
+        width: points(size.0),
+        height: points(size.1),
+    }
+    .inside(&screen.screen(), min)
+}
+
+/// Where a window opens on `screen`: the corner in desktop pixels and the
+/// size in points. At `left` when it was left somewhere, else `size` large in
+/// the middle.
+#[cfg(any(windows, test))]
+pub fn to_pixels(
+    left: Option<Placement>,
+    size: (i32, i32),
+    screen: &Pixels,
+    min: (i32, i32),
+) -> ((i32, i32), (i32, i32)) {
+    let room = screen.screen();
+    let placement = left
+        .unwrap_or(Placement {
+            x: (room.width - size.0) / 2,
+            y: (room.height - size.1) / 2,
+            width: size.0,
+            height: size.1,
+        })
+        .inside(&room, min);
+    let pixels = |points: i32| (f64::from(points) * screen.scale).round() as i32;
+    (
+        (
+            screen.x + pixels(placement.x),
+            screen.y + pixels(placement.y),
+        ),
+        (placement.width, placement.height),
+    )
+}
+
+#[cfg(windows)]
+fn pixels(screen: ditox_rpc::win::Screen) -> Pixels {
+    Pixels {
+        x: screen.x,
+        y: screen.y,
+        width: screen.width,
+        height: screen.height,
+        scale: screen.scale,
+    }
+}
+
+/// On Windows: where the list opens, on the screen the pointer is on. The
+/// corner in desktop pixels and the size in points.
+#[cfg(windows)]
+pub fn opening(min: (i32, i32), size: (i32, i32)) -> Option<((i32, i32), (f32, f32))> {
+    let screen = pixels(ditox_rpc::win::screen_under_pointer()?);
+    let (at, size) = to_pixels(load(), size, &screen, min);
+    Some((at, (size.0 as f32, size.1 as f32)))
+}
+
+/// Asks Windows where this window is and writes it down. Called as the
+/// window closes, while it is still on screen.
+#[cfg(windows)]
+pub fn remember(min: (i32, i32)) {
+    use ditox_rpc::win;
+    let placement = win::own_window().and_then(|window| {
+        let (x, y, width, height) = win::frame(&window.address)?;
+        let screen = pixels(win::screen_of(&window.address)?);
+        Some(from_pixels((x, y), (width, height), &screen, min))
+    });
+    if let (Some(path), Some(placement)) = (state_path(), placement)
+        && load_from(&path) != Some(placement)
+    {
+        let _ = save_to(&path, placement);
+    }
+}
+
 /// Asks Hyprland where this window is and writes it down. Called as the
 /// window closes, while it is still on screen.
+#[cfg(not(windows))]
 pub fn remember(min: (i32, i32)) {
     let (Some(path), Ok(clients), Ok(monitors)) = (
         state_path(),
@@ -275,13 +394,21 @@ pub fn relaunch_expression(
 
 /// What Hyprland is asked so that the window at `address` closes, as its
 /// close button would. `None` for an address that is not one.
+#[cfg(any(not(windows), test))]
 pub fn close_expression(address: &str) -> Option<String> {
     let digits = address.strip_prefix("0x")?;
     (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| format!("hl.dsp.window.close({{ window = \"address:{address}\" }})"))
 }
 
+/// Asks Windows to close the window at `address`, and says whether it took it.
+#[cfg(windows)]
+pub fn close(address: &str) -> bool {
+    ditox_rpc::win::close(address)
+}
+
 /// Asks Hyprland to close the window at `address`, and says whether it took it.
+#[cfg(not(windows))]
 pub fn close(address: &str) -> bool {
     close_expression(address).is_some_and(|expression| {
         ditox_rpc::hypr::request(&format!("/dispatch {expression}"), WAIT)
@@ -357,6 +484,60 @@ pub fn relaunch(min: (i32, i32), size: (i32, i32)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_windows_place_is_kept_in_points_from_the_corner_the_taskbar_leaves() {
+        // A second screen to the right at 150 %, its taskbar at the bottom.
+        let screen = Pixels {
+            x: 1920,
+            y: 0,
+            width: 2880,
+            height: 1548,
+            scale: 1.5,
+        };
+        let left = from_pixels((1920 + 300, 150), (630, 780), &screen, (320, 240));
+        assert_eq!(
+            left,
+            Placement {
+                x: 200,
+                y: 100,
+                width: 420,
+                height: 520
+            }
+        );
+        assert_eq!(
+            to_pixels(Some(left), (420, 520), &screen, (320, 240)),
+            ((1920 + 300, 150), (420, 520)),
+            "it opens where it was read from"
+        );
+        // Never left anywhere: the middle of what the taskbar leaves.
+        assert_eq!(
+            to_pixels(None, (420, 520), &screen, (320, 240)),
+            ((1920 + 1125, 384), (420, 520))
+        );
+        // Left on a larger screen: brought whole onto this one.
+        let small = Pixels {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 680,
+            scale: 1.0,
+        };
+        assert_eq!(
+            to_pixels(
+                Some(Placement {
+                    x: 1500,
+                    y: 600,
+                    width: 420,
+                    height: 900
+                }),
+                (420, 520),
+                &small,
+                (320, 240)
+            ),
+            ((860, 0), (420, 680))
+        );
+    }
 
     const SCREEN: Screen = Screen {
         x: 2560,

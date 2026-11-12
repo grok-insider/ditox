@@ -1,18 +1,26 @@
+// On Windows the daemon runs without a console window of its own.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::io::Read;
 use std::process::ExitCode;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Sender};
 
 use ditox_rpc::{Client, Kind, socket_path};
-use ditoxd::app::{App, Desktop, Hyprland, NoDesktop};
+use ditoxd::app::{App, Desktop, NoDesktop};
 use ditoxd::clipboard::Clipboard;
 use ditoxd::config::Config;
 use ditoxd::error::{Error, Result};
 use ditoxd::policy;
-use ditoxd::server::{self, Watch};
+use ditoxd::server::{self, Request, Watcher};
 
+#[cfg(not(windows))]
 const USAGE: &str = "usage: ditoxd daemon | ditoxd ingest <wake|text|image> | ditoxd --version";
+#[cfg(windows)]
+const USAGE: &str = "usage: ditoxd daemon | ditoxd install | ditoxd uninstall | ditoxd ingest <wake|text|image> | ditoxd --version";
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    ditox_rpc::win::attach_console();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let outcome = match args
         .iter()
@@ -21,6 +29,10 @@ fn main() -> ExitCode {
         .as_slice()
     {
         ["daemon" | "run"] => daemon(),
+        #[cfg(windows)]
+        ["install"] => install(),
+        #[cfg(windows)]
+        ["uninstall"] => ditoxd::windows::autostart::uninstall(),
         ["ingest", "wake"] => {
             wake();
             Ok(())
@@ -64,7 +76,8 @@ fn return_large_buffers() {
 
 fn daemon() -> Result<()> {
     return_large_buffers();
-    let socket = socket_path().ok_or_else(|| Error::Config("XDG_RUNTIME_DIR is not set".into()))?;
+    let socket = socket_path().ok_or_else(|| Error::Config(ditox_rpc::no_socket_path()))?;
+    #[cfg(unix)]
     if std::env::var_os("DITOX_SOCKET").is_none_or(|path| path.is_empty())
         && let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
     {
@@ -73,25 +86,62 @@ fn daemon() -> Result<()> {
     let cfg = Config::load()?;
     let clipboard = Clipboard::from_env();
     let mock = clipboard.is_mock();
-    let desktop: Box<dyn Desktop> = if mock {
-        Box::new(NoDesktop)
-    } else {
-        Box::new(Hyprland)
-    };
+    let desktop: Box<dyn Desktop> = if mock { Box::new(NoDesktop) } else { desktop() };
+    let open_keybind = cfg.open_keybind.clone();
     let app = App::open(cfg, clipboard, desktop)?;
     let _ = app.store.clear_watcher_error();
 
     let listener = server::listen(&socket)?;
     let (requests, queue) = mpsc::channel();
-    server::accept(listener, requests);
-
     let watch = if mock {
         None
     } else {
-        let exe = std::env::current_exe().map_err(|err| Error::Io(err.to_string()))?;
-        Some(Watch::new(exe.to_string_lossy().into_owned()))
+        Some(watcher(&requests, &open_keybind)?)
     };
+    server::accept(listener, requests);
     server::run(app, queue, watch);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn desktop() -> Box<dyn Desktop> {
+    Box::new(ditoxd::app::Hyprland)
+}
+
+#[cfg(windows)]
+fn desktop() -> Box<dyn Desktop> {
+    Box::new(ditoxd::windows::desktop::Windows)
+}
+
+fn own_program() -> Result<std::path::PathBuf> {
+    std::env::current_exe().map_err(|err| Error::Io(err.to_string()))
+}
+
+/// `wl-paste --watch`, which starts this program again for every change.
+#[cfg(not(windows))]
+fn watcher(_: &Sender<Request>, _: &str) -> Result<Box<dyn Watcher>> {
+    let exe = own_program()?.to_string_lossy().into_owned();
+    Ok(Box::new(server::Watch::new(exe)))
+}
+
+/// A thread that Windows tells of every change, and of the key that opens
+/// the list: the `ditox` beside this program.
+#[cfg(windows)]
+fn watcher(requests: &Sender<Request>, open_keybind: &str) -> Result<Box<dyn Watcher>> {
+    let list = own_program()?.with_file_name("ditox.exe");
+    Ok(Box::new(ditoxd::windows::listener::Listener::new(
+        requests.clone(),
+        list,
+        open_keybind,
+    )))
+}
+
+/// Start the daemon with every session from now on.
+#[cfg(windows)]
+fn install() -> Result<()> {
+    let exe = own_program()?.to_string_lossy().into_owned();
+    ditoxd::windows::autostart::install(&exe)?;
+    println!("ditoxd starts with the session from now on. Start it now with: ditoxd daemon");
     Ok(())
 }
 

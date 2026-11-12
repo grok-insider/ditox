@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::dirs;
+
 pub const MIN_LINES: u32 = 1;
 pub const MAX_LINES: u32 = 5;
 
@@ -140,17 +142,17 @@ fn scalar(value: &str) -> &str {
     value.split('#').next().unwrap_or(value).trim()
 }
 
-/// `DITOX_CONFIG`, else `ditox/config.toml` under `XDG_CONFIG_HOME` or `~/.config`.
+/// `DITOX_CONFIG`, else `ditox/config.toml` under `XDG_CONFIG_HOME`,
+/// `~/.config`, or `%APPDATA%` on Windows.
 pub fn config_path() -> Option<PathBuf> {
-    let env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-    if let Some(path) = env("DITOX_CONFIG") {
+    if let Some(path) = dirs::process_env("DITOX_CONFIG") {
         return Some(PathBuf::from(path));
     }
-    let base = match env("XDG_CONFIG_HOME") {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(env("HOME")?).join(".config"),
-    };
-    Some(base.join("ditox/config.toml"))
+    Some(
+        dirs::config_home(&dirs::process_env)?
+            .join("ditox")
+            .join("config.toml"),
+    )
 }
 
 /// Everything the options window can change.
@@ -165,6 +167,10 @@ pub struct Settings {
     pub paste_keybind: String,
     pub terminal_paste_keybind: String,
     pub terminal_apps: Vec<String>,
+    /// The key the daemon listens for to open the list, where it is the
+    /// daemon that listens: on Windows. Empty for none.
+    #[serde(default)]
+    pub open_keybind: String,
     pub excluded_apps: Vec<String>,
     pub excluded_windows: Vec<String>,
     pub secret_patterns: Vec<String>,

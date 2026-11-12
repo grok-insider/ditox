@@ -311,7 +311,7 @@ fn without_a_daemon_the_window_says_so_and_fills_in_when_it_answers() {
     told(&mut runtime, Told::Offline("no socket".into()));
     for needle in [
         "The daemon is not running",
-        "systemctl --user start ditox",
+        crate::model::START_DAEMON,
         "no socket",
     ] {
         assert!(says(&runtime, needle), "{needle}");

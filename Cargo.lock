@@ -757,6 +757,8 @@ dependencies = [
  "base64",
  "serde",
  "serde_json",
+ "uds_windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -765,11 +767,13 @@ version = "0.2.0"
 dependencies = [
  "base64",
  "ditox-rpc",
+ "image",
  "libc",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

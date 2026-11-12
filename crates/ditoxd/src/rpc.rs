@@ -529,17 +529,18 @@ mod tests {
 
         std::fs::remove_file(&app.cfg.config_path).unwrap();
         std::fs::write(dir.path("store.toml"), "").unwrap();
-        std::os::unix::fs::symlink(dir.path("store.toml"), &app.cfg.config_path).unwrap();
-        let mut more = wanted.clone();
-        more.max_entries = 9;
-        assert_eq!(
-            error_code(&mut app, "config.set", json!({ "settings": more })),
-            INVALID_PARAMS
-        );
-        assert_eq!(app.cfg.max_entries, 2);
-        let view: ConfigView =
-            serde_json::from_value(ok(&mut app, "config.get", json!({}))).unwrap();
-        assert!(!view.writable);
+        if crate::testing::link(dir.path("store.toml"), &app.cfg.config_path) {
+            let mut more = wanted.clone();
+            more.max_entries = 9;
+            assert_eq!(
+                error_code(&mut app, "config.set", json!({ "settings": more })),
+                INVALID_PARAMS
+            );
+            assert_eq!(app.cfg.max_entries, 2);
+            let view: ConfigView =
+                serde_json::from_value(ok(&mut app, "config.get", json!({}))).unwrap();
+            assert!(!view.writable);
+        }
     }
 
     #[test]

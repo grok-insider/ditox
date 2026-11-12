@@ -1,22 +1,30 @@
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use ditox_rpc::frame::{FrameReader, write_frame};
+use ditox_rpc::sock::{UnixListener, UnixStream};
 
 use crate::app::App;
+use crate::config::Config;
 use crate::error::{Error, Result};
+#[cfg(unix)]
 use crate::policy;
 use crate::rpc;
 
 const IDLE_TICK: Duration = Duration::from_secs(1);
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
-const CAPTURE_SETTLE: Duration = Duration::from_millis(40);
-const CAPTURE_DEADLINE: Duration = Duration::from_millis(250);
+/// How long after the last change the clipboard is read. A Windows program
+/// fills the clipboard in several steps and has to open it for each; read in
+/// between, it fails to finish the copy, so it is given longer there.
+const CAPTURE_SETTLE: Duration = Duration::from_millis(if cfg!(windows) { 150 } else { 40 });
+const CAPTURE_DEADLINE: Duration = Duration::from_millis(if cfg!(windows) { 600 } else { 250 });
 
 pub struct Request {
     pub body: Vec<u8>,
@@ -25,6 +33,7 @@ pub struct Request {
 
 /// `XDG_RUNTIME_DIR` must be the user's own and closed to everyone else, or
 /// somebody else could swap the socket directory under the daemon.
+#[cfg(unix)]
 pub fn check_runtime_dir(dir: &Path) -> Result<()> {
     let meta =
         std::fs::metadata(dir).map_err(|err| Error::Io(format!("{}: {err}", dir.display())))?;
@@ -38,11 +47,9 @@ pub fn check_runtime_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn listen(path: &Path) -> Result<UnixListener> {
-    let dir = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .ok_or_else(|| Error::Io("the socket path has no directory".into()))?;
+/// The directory of the socket, made for its user alone when it is missing.
+#[cfg(unix)]
+fn private_dir(dir: &Path) -> Result<()> {
     if !dir.exists() {
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -50,15 +57,34 @@ pub fn listen(path: &Path) -> Result<UnixListener> {
             .create(dir)
             .map_err(|err| Error::Io(format!("{}: {err}", dir.display())))?;
     }
-    let meta =
-        std::fs::metadata(dir).map_err(|err| Error::Io(format!("{}: {err}", dir.display())))?;
-    let user = unsafe { libc::getuid() };
-    if !policy::runtime_dir_acceptable(meta.uid(), meta.mode(), user) {
-        return Err(Error::Io(format!(
-            "{} belongs to someone else or is writable by others",
-            dir.display()
-        )));
-    }
+    check_runtime_dir(dir)
+}
+
+/// The directory of the socket. On Windows it lies under the user's local
+/// application data, which other users cannot write: a directory made there
+/// inherits that.
+#[cfg(windows)]
+fn private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).map_err(|err| Error::Io(format!("{}: {err}", dir.display())))
+}
+
+#[cfg(unix)]
+fn private_socket(path: &Path) -> Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(policy::SOCKET_MODE))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn private_socket(_: &Path) -> Result<()> {
+    Ok(())
+}
+
+pub fn listen(path: &Path) -> Result<UnixListener> {
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| Error::Io("the socket path has no directory".into()))?;
+    private_dir(dir)?;
     if path.exists() {
         if UnixStream::connect(path).is_ok() {
             return Err(Error::Io(format!(
@@ -71,7 +97,7 @@ pub fn listen(path: &Path) -> Result<UnixListener> {
     }
     let listener =
         UnixListener::bind(path).map_err(|err| Error::Io(format!("{}: {err}", path.display())))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(policy::SOCKET_MODE))?;
+    private_socket(path)?;
     Ok(listener)
 }
 
@@ -106,12 +132,28 @@ fn serve_connection(mut stream: UnixStream, requests: Sender<Request>) {
     }
 }
 
+/// What tells the daemon that the clipboard changed.
+pub trait Watcher {
+    /// Starts it when it is not running. A failure is told once, the first
+    /// time, and `Err(None)` for as long as it lasts.
+    fn ensure_running(&mut self) -> std::result::Result<(), Option<String>>;
+
+    /// Shown the settings every tick, for a watcher that lives by some of
+    /// them. Returns a problem worth telling the user.
+    fn follow(&mut self, _: &Config) -> Option<String> {
+        None
+    }
+}
+
+/// `wl-paste --watch`, which runs `ditoxd ingest wake` on every change.
+#[cfg(unix)]
 pub struct Watch {
     exe: String,
     child: Option<Child>,
     failing: bool,
 }
 
+#[cfg(unix)]
 impl Watch {
     pub fn new(exe: String) -> Self {
         Watch {
@@ -140,8 +182,11 @@ impl Watch {
         }
         command.spawn()
     }
+}
 
-    pub fn ensure_running(&mut self) -> std::result::Result<(), Option<String>> {
+#[cfg(unix)]
+impl Watcher for Watch {
+    fn ensure_running(&mut self) -> std::result::Result<(), Option<String>> {
         let exited = match &mut self.child {
             Some(child) => match child.try_wait() {
                 Ok(None) => {
@@ -171,6 +216,7 @@ impl Watch {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Watch {
     fn drop(&mut self) {
         if let Some(child) = &mut self.child {
@@ -198,7 +244,7 @@ impl Settle {
     }
 }
 
-pub fn run(mut app: App, requests: Receiver<Request>, mut watch: Option<Watch>) {
+pub fn run(mut app: App, requests: Receiver<Request>, mut watch: Option<Box<dyn Watcher>>) {
     let mut settle: Option<Settle> = None;
     let mut next_tick = Instant::now();
     loop {
@@ -214,6 +260,10 @@ pub fn run(mut app: App, requests: Receiver<Request>, mut watch: Option<Watch>) 
                             let _ = app.store.set_watcher_error(&problem);
                         }
                     }
+                }
+                if let Some(problem) = watch.follow(&app.cfg) {
+                    eprintln!("ditoxd: {problem}");
+                    let _ = app.store.set_watcher_error(&problem);
                 }
             }
         }
@@ -239,6 +289,7 @@ pub fn run(mut app: App, requests: Receiver<Request>, mut watch: Option<Watch>) 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use ditox_rpc::{Client, Filter};
@@ -249,6 +300,7 @@ mod tests {
     use crate::config::Config;
     use crate::testing::TempDir;
 
+    #[cfg(unix)]
     #[test]
     fn the_watch_asks_ingest_to_wake() {
         assert_eq!(
@@ -270,7 +322,10 @@ mod tests {
         );
 
         let second = Settle::after_wake(Some(first), start + Duration::from_millis(30));
-        assert_eq!(second.due, start + Duration::from_millis(70));
+        assert_eq!(
+            second.due,
+            start + Duration::from_millis(30) + CAPTURE_SETTLE
+        );
 
         let mut pending = second;
         for step in 2..20 {
@@ -285,6 +340,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_socket_is_private_and_a_writable_directory_is_refused() {
         let dir = TempDir::new("socket");
@@ -311,6 +367,7 @@ mod tests {
         assert!(listen(Path::new(&format!("{open}/rpc.sock"))).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_runtime_directory_others_can_write_is_refused() {
         let dir = TempDir::new("runtime");

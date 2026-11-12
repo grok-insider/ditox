@@ -96,7 +96,8 @@ pub fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
     }
 }
 
-#[cfg(test)]
+// The children are shell commands.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

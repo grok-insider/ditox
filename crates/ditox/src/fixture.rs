@@ -412,6 +412,7 @@ pub fn config_view() -> ConfigView {
             paste_buffer_ms: 120,
             paste_keybind: "ctrl+v".into(),
             terminal_paste_keybind: "ctrl+shift+v".into(),
+            open_keybind: if cfg!(windows) { "ctrl+alt+v" } else { "" }.into(),
             terminal_apps: [
                 "kitty",
                 "ghostty",

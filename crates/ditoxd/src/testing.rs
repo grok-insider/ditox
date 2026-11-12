@@ -32,6 +32,16 @@ impl Drop for TempDir {
     }
 }
 
+/// A link at `path` to the file `target`. Windows lets only some users make
+/// links; `false` says this one could not, and what depends on it is skipped.
+pub fn link(target: impl AsRef<std::path::Path>, path: impl AsRef<std::path::Path>) -> bool {
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, path);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(target, path);
+    made.is_ok() || cfg!(unix) && panic!("a link could not be made")
+}
+
 pub struct TestStore {
     pub dir: TempDir,
     pub cfg: Config,

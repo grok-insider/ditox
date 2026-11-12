@@ -3,9 +3,10 @@
 //! a paste lands.
 
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+use crate::sock::UnixStream;
 
 const REPLY_LIMIT: usize = 1024 * 1024;
 
@@ -63,7 +64,7 @@ pub fn request_at(path: &Path, command: &str, timeout: Duration) -> io::Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use crate::sock::UnixListener;
 
     fn socket(label: &str) -> (PathBuf, UnixListener) {
         let dir = std::env::temp_dir().join(format!("ditox-hypr-{label}-{}", std::process::id()));

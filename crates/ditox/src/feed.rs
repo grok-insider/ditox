@@ -441,6 +441,11 @@ impl Session {
                 self.thumb_fit = fit;
             }
             Command::Paste { id, mode, target } => {
+                // This window has the keyboard; the daemon is about to give
+                // it to the one the clip goes to, and Windows asks the
+                // holder first.
+                #[cfg(windows)]
+                ditox_rpc::win::allow_focus_change();
                 match self.call(|client| client.paste(id, mode, target.as_deref())) {
                     Ok(result) if result.pasted => self.out.push(Event::Pasted),
                     Ok(result) => self.out.push(Event::PasteRefused(result.reason)),
@@ -518,7 +523,14 @@ fn open(address: &str) {
     if crate::model::link(address).is_none() {
         return;
     }
-    let _ = std::process::Command::new("xdg-open")
+    // The system's own handler for the address: no shell reads it.
+    #[cfg(windows)]
+    let mut handler = std::process::Command::new("rundll32.exe");
+    #[cfg(windows)]
+    handler.arg("url.dll,FileProtocolHandler");
+    #[cfg(not(windows))]
+    let mut handler = std::process::Command::new("xdg-open");
+    let _ = handler
         .arg(address)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -542,7 +554,10 @@ fn open_options() {
 fn explain(err: &RpcError) -> String {
     match err {
         RpcError::Remote { code, .. } if *code == METHOD_NOT_FOUND => {
-            "The running ditoxd is older than this window. Restart it: systemctl --user restart ditox".into()
+            format!(
+                "The running ditoxd is older than this window. Restart it: {}",
+                crate::model::RESTART_DAEMON
+            )
         }
         other => other.to_string(),
     }

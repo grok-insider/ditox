@@ -165,7 +165,7 @@ fn body(state: &State, p: &Palette) -> El {
             "offline",
             "The daemon is not running",
             "Start it and this window fills in.",
-            Some("systemctl --user start ditox"),
+            Some(crate::model::START_DAEMON),
             Some(reason),
             p,
         ),

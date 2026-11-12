@@ -1,3 +1,6 @@
+// On Windows the windows open without a console beside them.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod feed;
 mod fixture;
 mod list;
@@ -16,6 +19,7 @@ use rune::{App, AppHandle, AppSpec, WindowOptions};
 pub const APP_ID: &str = "dev.ditox";
 const LIST_TITLE: &str = "Ditox";
 const OPTIONS_TITLE: &str = "Ditox Options";
+#[cfg(not(windows))]
 const HYPRLAND_WAIT: Duration = Duration::from_millis(500);
 
 struct Window {
@@ -24,8 +28,33 @@ struct Window {
     title: String,
 }
 
+/// The window that has the keyboard, as Windows has it.
+#[cfg(windows)]
+fn active_window() -> Option<Window> {
+    ditox_rpc::win::foreground().map(|window| Window {
+        address: window.address,
+        class: window.class,
+        title: window.title,
+    })
+}
+
+/// Whether `window` is one of this program's. Hyprland knows a window by the
+/// application id it was given, Windows by the program that owns it.
+fn ours(window: &Window) -> bool {
+    if cfg!(windows) {
+        std::env::current_exe().is_ok_and(|program| {
+            program
+                .file_stem()
+                .is_some_and(|name| name.eq_ignore_ascii_case(&window.class))
+        })
+    } else {
+        window.class == APP_ID
+    }
+}
+
 /// The window that has the keyboard, from Hyprland's socket, or from
 /// `hyprctl` when the socket is not where expected.
+#[cfg(not(windows))]
 fn active_window() -> Option<Window> {
     let reply = match ditox_rpc::hypr::request("j/activewindow", HYPRLAND_WAIT) {
         Ok(reply) => reply,
@@ -53,6 +82,8 @@ fn active_window() -> Option<Window> {
 }
 
 fn main() {
+    #[cfg(windows)]
+    ditox_rpc::win::attach_console();
     startup::prepare();
     rune::set_app_id(APP_ID);
     match std::env::args().nth(1).as_deref() {
@@ -93,7 +124,7 @@ fn clips() {
         // Asked for again while it is open, the list goes away: the key that
         // opens it also puts it back. The options window is this program
         // too: nothing is pasted into it.
-        if window.as_ref().is_some_and(|window| window.class == APP_ID) {
+        if window.as_ref().is_some_and(ours) {
             if let Some(list) = window.filter(|window| window.title == LIST_TITLE) {
                 place::close(&list.address);
                 return;
@@ -118,6 +149,15 @@ fn clips() {
         })
         .filter(|_| !rune::is_headless())
         .unwrap_or(list::SIZE);
+    // A Windows window says where it opens: where it was left, on the screen
+    // the pointer is on.
+    #[cfg(windows)]
+    let (size, position) = match place::opening(min, (list::SIZE.0 as i32, list::SIZE.1 as i32)) {
+        Some((at, size)) if !rune::is_headless() => (size, Some(at)),
+        _ => (size, None),
+    };
+    #[cfg(not(windows))]
+    let position = None;
     let spec = AppSpec {
         scenes: fixture::SCENES,
         fonts: theme::FONTS,
@@ -131,6 +171,7 @@ fn clips() {
     let app = App::new(spec)
         .window_options(WindowOptions {
             borderless: true,
+            position,
             ..Default::default()
         })
         .float_on_open()

@@ -56,6 +56,8 @@ pub struct State {
     pub buffer_ms: TextEdit,
     pub keybind: TextEdit,
     pub terminal_keybind: TextEdit,
+    /// The key that opens the list. Shown where the daemon listens for it.
+    pub open_keybind: TextEdit,
     pub terminal_apps: TextEdit,
     pub excluded_apps: TextEdit,
     pub excluded_windows: TextEdit,
@@ -82,6 +84,7 @@ impl State {
             buffer_ms: TextEdit::new(""),
             keybind: TextEdit::new(""),
             terminal_keybind: TextEdit::new(""),
+            open_keybind: TextEdit::new(""),
             terminal_apps: TextEdit::new(""),
             excluded_apps: TextEdit::new(""),
             excluded_windows: TextEdit::new(""),
@@ -105,6 +108,7 @@ impl State {
         self.buffer_ms = TextEdit::new(settings.paste_buffer_ms.to_string());
         self.keybind = TextEdit::new(&settings.paste_keybind);
         self.terminal_keybind = TextEdit::new(&settings.terminal_paste_keybind);
+        self.open_keybind = TextEdit::new(&settings.open_keybind);
         self.terminal_apps = TextEdit::new(settings.terminal_apps.join("\n"));
         self.excluded_apps = TextEdit::new(settings.excluded_apps.join("\n"));
         self.excluded_windows = TextEdit::new(settings.excluded_windows.join("\n"));
@@ -151,6 +155,7 @@ impl State {
             paste_buffer_ms: number(&self.buffer_ms, "Wait before pasting")?,
             paste_keybind: self.keybind.text.trim().to_string(),
             terminal_paste_keybind: self.terminal_keybind.text.trim().to_string(),
+            open_keybind: self.open_keybind.text.trim().to_string(),
             terminal_apps: lines(&self.terminal_apps),
             excluded_apps: lines(&self.excluded_apps),
             excluded_windows: lines(&self.excluded_windows),

@@ -3,6 +3,7 @@ mod fixture;
 mod list;
 mod model;
 mod options;
+mod overlay;
 mod picture;
 mod place;
 mod startup;
@@ -107,6 +108,7 @@ fn clips() {
             return;
         }
         feed::start();
+        overlay::start();
     }
     // Started on its own, the window still opens as large as it was left.
     let size = placed

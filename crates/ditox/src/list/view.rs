@@ -110,7 +110,9 @@ fn elsewhere(
 }
 
 fn body(state: &State, p: &Palette) -> El {
+    // A picture the screen shows large leaves the list where it is.
     if state.peek
+        && state.on_screen().is_none()
         && let Some(clip) = state.current()
     {
         return peek(state, clip, p);

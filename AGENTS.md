@@ -87,11 +87,16 @@ Every request runs on one thread, in order. A `clipboard.wake` asks for a captur
 | `model.rs` | Pure helpers: what a row says, the caption of a clip seen whole, links, search marks, selection |
 | `feed.rs` | The list's background thread that talks to the daemon |
 | `picture.rs` | The threads that decode pictures: one for the clip seen whole, one for the rows |
+| `overlay.rs` | A picture shown large on the screen through the hypr-overlay plugin, and the thread that asks for it |
 | `place.rs` | Where the list opens and how large: read from Hyprland as it closes, asked of Hyprland as it opens |
 | `startup.rs` | Before the window: which Vulkan drivers load, how freed memory is returned |
 | `fixture.rs` | Snapshot scenes |
 
 The list polls `history.pulse` every 250 ms and asks for the list again only when the revision moved. Lists are compact (400 characters of text): a row needs no more. While a clip is seen whole (`peek`), its full text or image comes from `entries.get` and `entries.get_image`: the window says which clip it waits for (`Want`); the feed fetches only the last one asked, retries a failure on the next pulse, and reports a clip that is gone or unreadable.
+
+Where Hyprland has the hypr-overlay plugin, an image clip seen whole is drawn on the screen by the compositor and not in the window (`overlay.rs`). A thread asks the plugin what it takes (`j/hyproverlay status`: `surfaces.rgba.shm`, `surfaceDimension`, `surfaceBytesPerSurface`) and tells the window (`Event::Preview`). From then on a picture that arrives goes to that thread (`Load`), which makes it as small as the plugin takes and keeps the last three; the window keeps no copy, only the ids (`State::preview`). To show one it asks Hyprland where the list and its screen are, opens one surface (`ditox.preview`, one buffer, click-through) in the middle of what the bars leave, or beside the list when the middle would cover it, writes the pixels to the shared memory the plugin names under `/dev/shm`, and presents it. The picture is drawn at most half as large again as its pixels. Any refusal ends it: the surface is closed, the window is told (`Preview(false)`) and shows pictures itself again. `on_close` waits up to a second for the surface to be closed (`overlay::finish`); a run that dies with a picture up leaves it there until the next list opens, which closes it first.
+
+What the window asks for follows the clip being looked at, and every handler that can change it ends in `settle` (`ask_for_the_selected_clip`, `show_on_the_screen`): left to the poll alone, the picture came up one key late on a real compositor.
 
 A row of an image clip shows a small picture. The list tells the window which rows are in view (`on_visible_rows`); the window asks for the pictures those rows and a few past them lack (`Thumbs`, a list that replaces the one before). The feed fetches one image a turn, hands it to a second decode thread, and lets at most two wait there: each is a whole image file in memory. A picture that cannot be made is said once (`NoThumb`) and not asked for again.
 
@@ -149,6 +154,8 @@ Both windows take their looks from Fabrials UI 0.11 (`libs/fabrials-ui/DESIGN.md
 - The list is never put, or written down, partly off its screen or under a bar: `Placement::inside` is applied when the place is read from Hyprland and again when it is asked for, on the screen it will open on.
 - The run that asks Hyprland to start the program again opens nothing itself, and the run started with `--placed` never asks again.
 - A press inside the window, on a row or on nothing, never closes it: the stretches that close it lie wholly outside the root.
+- A picture on the screen never outlives its window while the program can help it: every way of closing goes through `on_close`, and the worker closes the surface before it says it has finished.
+- The picture on the screen never covers the list when there is room beside it, and never takes input.
 - The daemon is the only writer of `config.toml`. It takes settings whole or not at all, writes the file beside itself and renames it, and refuses a file that is a link. What `render` writes, `apply_file` reads back to the same config: a test holds the two together.
 - A string in the config is read with its quotes: a comma, a `#` or a bracket inside one is text.
 - A window that cannot open exits. Rune would keep the process alive without one.
@@ -164,6 +171,8 @@ The method table is `crates/ditoxd/src/rpc.rs`: `health.check`, `config.get`, `c
 - `~/.config/ditox/config.toml`
 
 Tests use temporary directories. To run the daemon by hand, set `DITOX_DATA_DIR`, `DITOX_SOCKET` and `DITOX_CLIPBOARD_MOCK` (see the README). Do not point a development daemon at the real database.
+
+The picture on the screen is drawn over whatever the user is looking at: do not test it on the user's compositor. A Hyprland of one's own needs a parent that offers `xdg_wm_base` 6 (labwc does, Sway 1.11 does not), its own `XDG_RUNTIME_DIR` with a short path (the socket path has a limit), `HYPRLAND_NO_SD_VARS=1`, and the plugin loaded with `hyprctl plugin load`. With no keyboard device, keys go in with `hl.dsp.send_shortcut` while a `wtype -s <long>` holds a virtual keyboard whose keymap has them.
 
 Do not open the window on the user's desktop to test it: it reads the active window and `Enter` pastes into it. Use `--snap`, the headless tests, or a compositor of your own with a mock daemon and `DITOX_CONFIG` pointed at a file of your own: Save in the options writes it. On a live Hyprland, a window in a workspace that is never shown (`special:hidden`) can be started with `--placed=WxH` and `DITOX_STATE` pointed at a file of your own; without `--placed` the program asks Hyprland to open it on the workspace the user is looking at, holding the keyboard.
 

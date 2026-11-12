@@ -677,6 +677,277 @@ fn tab_shows_the_clip_whole_and_only_then_asks_for_the_rest_of_it() {
     assert!(runtime.state.query.focused);
 }
 
+/// The clips of the fixture with a second picture after the first.
+fn two_shots() -> State {
+    let mut state = fixture::ready();
+    let mut second = state.clips[3].clone();
+    second.id = 40;
+    state.clips.insert(4, second);
+    state.selected = 3;
+    state
+}
+
+fn shot(width: u32, height: u32) -> picture::Picture {
+    picture::Picture {
+        width,
+        height,
+        rgba: vec![7; (width * height * 4) as usize],
+    }
+}
+
+fn arrives(runtime: &mut Runtime<State>, id: i64) {
+    deliver(
+        runtime,
+        feed::Event::Picture {
+            id,
+            picture: shot(8, 6),
+        },
+    );
+}
+
+#[test]
+fn where_the_screen_can_show_it_a_picture_goes_there_and_the_list_stays() {
+    let mut runtime = runtime(two_shots());
+    deliver(&mut runtime, feed::Event::Preview(true));
+    feed::take_sent();
+    overlay::take_sent();
+
+    key(&mut runtime, Key::Tab, Mods::default());
+    turn(&mut runtime);
+    assert!(runtime.find("list").is_some() && runtime.find("peek").is_none());
+    assert_eq!(
+        wants(&feed::take_sent()),
+        [Some(feed::Wanted { id: 4, image: true })]
+    );
+    assert!(overlay::take_sent().is_empty(), "nothing to show yet");
+    assert!(labels(&runtime.state).contains(&"Hide the picture"));
+
+    arrives(&mut runtime, 4);
+    assert_eq!(
+        overlay::take_sent(),
+        [overlay::Command::Load {
+            id: 4,
+            picture: shot(8, 6),
+            show: true
+        }]
+    );
+    assert!(
+        !runtime.state.images.contains(4),
+        "the window keeps no copy of what the screen shows"
+    );
+    assert_eq!(wants(&feed::take_sent()), [None]);
+
+    key(&mut runtime, Key::Down, Mods::default());
+    turn(&mut runtime);
+    assert_eq!(
+        wants(&feed::take_sent()),
+        [Some(feed::Wanted {
+            id: 40,
+            image: true
+        })]
+    );
+    assert!(
+        overlay::take_sent().is_empty(),
+        "the picture before stays up until the next one is here"
+    );
+    arrives(&mut runtime, 40);
+    assert!(matches!(
+        overlay::take_sent()[..],
+        [overlay::Command::Load {
+            id: 40,
+            show: true,
+            ..
+        }]
+    ));
+
+    key(&mut runtime, Key::Up, Mods::default());
+    turn(&mut runtime);
+    assert_eq!(overlay::take_sent(), [overlay::Command::Show(4)]);
+    assert!(
+        wants(&feed::take_sent()).iter().all(Option::is_none),
+        "a picture kept there is not fetched again"
+    );
+
+    // A text clip is read in the window, and the picture comes down.
+    key(&mut runtime, Key::Up, Mods::default());
+    turn(&mut runtime);
+    assert_eq!(overlay::take_sent(), [overlay::Command::Hide]);
+    assert!(runtime.find("peek").is_some() && runtime.find("list").is_none());
+    key(&mut runtime, Key::Down, Mods::default());
+    turn(&mut runtime);
+    assert_eq!(overlay::take_sent(), [overlay::Command::Show(4)]);
+    assert!(runtime.find("list").is_some());
+
+    key(&mut runtime, Key::Escape, Mods::default());
+    turn(&mut runtime);
+    assert_eq!(overlay::take_sent(), [overlay::Command::Hide]);
+    assert!(!runtime.state.peek && !closing(&runtime));
+    turn(&mut runtime);
+    assert!(overlay::take_sent().is_empty(), "it is taken down once");
+
+    key(&mut runtime, Key::Tab, Mods::default());
+    turn(&mut runtime);
+    assert_eq!(overlay::take_sent(), [overlay::Command::Show(4)]);
+    key(&mut runtime, Key::Text("z".into()), Mods::default());
+    turn(&mut runtime);
+    assert_eq!(
+        overlay::take_sent(),
+        [overlay::Command::Hide],
+        "a search puts the picture away"
+    );
+}
+
+#[test]
+fn the_picture_follows_each_key_and_press_without_waiting_for_a_turn() {
+    let mut runtime = runtime(two_shots());
+    deliver(&mut runtime, feed::Event::Preview(true));
+    key(&mut runtime, Key::Tab, Mods::default());
+    arrives(&mut runtime, 4);
+    // From here the window is given no turn of its own.
+    runtime.poll = None;
+    feed::take_sent();
+    overlay::take_sent();
+
+    key(&mut runtime, Key::Escape, Mods::default());
+    assert_eq!(overlay::take_sent(), [overlay::Command::Hide]);
+    key(&mut runtime, Key::Tab, Mods::default());
+    assert_eq!(overlay::take_sent(), [overlay::Command::Show(4)]);
+    key(&mut runtime, Key::Down, Mods::default());
+    assert_eq!(
+        wants(&feed::take_sent()),
+        [Some(feed::Wanted {
+            id: 40,
+            image: true
+        })]
+    );
+    key(&mut runtime, Key::Up, Mods::default());
+    key(&mut runtime, Key::Text("z".into()), Mods::default());
+    assert_eq!(overlay::take_sent(), [overlay::Command::Hide]);
+
+    let mut runtime = runtime_with_picture();
+    press(&mut runtime, "clip-2");
+    assert_eq!(overlay::take_sent(), [overlay::Command::Hide]);
+    assert!(
+        runtime.find("peek").is_some(),
+        "a text clip is read in the window"
+    );
+    press(&mut runtime, "back");
+    press(&mut runtime, "clip-4");
+    assert!(overlay::take_sent().is_empty());
+    key(&mut runtime, Key::Command('m'), ctrl());
+    let view = labels(&runtime.state)
+        .iter()
+        .position(|label| *label == "View")
+        .unwrap();
+    overlay::take_sent();
+    press(&mut runtime, &format!("menu-{view}"));
+    assert_eq!(overlay::take_sent(), [overlay::Command::Show(4)]);
+}
+
+/// A window with the first picture up on the screen and no turn of its own.
+fn runtime_with_picture() -> Runtime<State> {
+    let mut runtime = runtime(two_shots());
+    deliver(&mut runtime, feed::Event::Preview(true));
+    key(&mut runtime, Key::Tab, Mods::default());
+    arrives(&mut runtime, 4);
+    runtime.poll = None;
+    feed::take_sent();
+    overlay::take_sent();
+    runtime
+}
+
+#[test]
+fn a_picture_that_arrives_late_is_kept_and_not_shown() {
+    let mut runtime = runtime(two_shots());
+    deliver(&mut runtime, feed::Event::Preview(true));
+    key(&mut runtime, Key::Tab, Mods::default());
+    turn(&mut runtime);
+    key(&mut runtime, Key::Down, Mods::default());
+    turn(&mut runtime);
+    overlay::take_sent();
+    arrives(&mut runtime, 4);
+    assert!(matches!(
+        overlay::take_sent()[..],
+        [overlay::Command::Load {
+            id: 4,
+            show: false,
+            ..
+        }]
+    ));
+    assert_eq!(runtime.state.preview.showing, None);
+
+    // More pictures than are kept there: the oldest is asked for again.
+    for id in [40, 41, 42] {
+        arrives(&mut runtime, id);
+    }
+    assert_eq!(runtime.state.preview.held, [40, 41, 42]);
+    feed::take_sent();
+    key(&mut runtime, Key::Up, Mods::default());
+    turn(&mut runtime);
+    assert_eq!(
+        wants(&feed::take_sent()),
+        [Some(feed::Wanted { id: 4, image: true })]
+    );
+}
+
+#[test]
+fn what_the_screen_cannot_show_the_window_does() {
+    let mut state = two_shots();
+    state.clips[3].image_width = Some(20_000);
+    state.clips[3].image_height = Some(20_000);
+    let mut huge = runtime(state);
+    deliver(&mut huge, feed::Event::Preview(true));
+    overlay::take_sent();
+    key(&mut huge, Key::Tab, Mods::default());
+    turn(&mut huge);
+    assert!(says(&huge, "Too large to show") && huge.find("peek").is_some());
+    assert!(overlay::take_sent().is_empty());
+    assert!(labels(&huge.state).contains(&"Back to the list"));
+
+    let mut gone = runtime(two_shots());
+    deliver(&mut gone, feed::Event::Preview(true));
+    key(&mut gone, Key::Tab, Mods::default());
+    turn(&mut gone);
+    arrives(&mut gone, 4);
+    overlay::take_sent();
+    deliver(&mut gone, feed::Event::Unavailable(4, feed::Gone::Missing));
+    assert_eq!(overlay::take_sent(), [overlay::Command::Hide]);
+    assert!(says(&gone, "This image is no longer stored"));
+
+    // The compositor stops showing pictures: the window asks for the
+    // picture again and shows it itself.
+    let mut state = two_shots();
+    state.cache = Some(ImageCache::new(Arc::new(|| {})));
+    let mut lost = runtime(state);
+    deliver(&mut lost, feed::Event::Preview(true));
+    key(&mut lost, Key::Tab, Mods::default());
+    turn(&mut lost);
+    arrives(&mut lost, 4);
+    feed::take_sent();
+    overlay::take_sent();
+    deliver(&mut lost, feed::Event::Preview(false));
+    assert_eq!(
+        wants(&feed::take_sent()),
+        [Some(feed::Wanted { id: 4, image: true })]
+    );
+    assert!(lost.find("peek").is_some() && lost.find("peek-image").is_none());
+    assert_eq!(lost.state.preview, Preview::default());
+    arrives(&mut lost, 4);
+    assert!(lost.find("peek-image").is_some());
+    assert!(
+        overlay::take_sent().is_empty(),
+        "nothing more is sent to a screen that shows nothing"
+    );
+}
+
+#[test]
+fn closing_the_window_takes_the_picture_down() {
+    let mut state = two_shots();
+    overlay::take_sent();
+    on_close(&mut state, &mut Tx::default());
+    assert_eq!(overlay::take_sent(), [overlay::Command::Finish]);
+}
+
 #[test]
 fn there_is_no_clip_to_see_whole_when_the_list_is_empty_or_its_last_clip_goes() {
     let mut empty = runtime(State {

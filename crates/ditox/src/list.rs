@@ -11,6 +11,7 @@ use rune::{ImageCache, Key, KeyEvent, Pixels, Spring, TextEdit, Tx, Waker};
 
 use crate::feed;
 use crate::model::{self, Link};
+use crate::overlay;
 use crate::picture;
 
 pub mod view;
@@ -108,6 +109,29 @@ pub struct Item {
     pub leads: bool,
 }
 
+/// The picture shown large on the screen, outside the window, as far as
+/// the window knows: what it asked the compositor's side for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Preview {
+    /// The compositor can show pictures.
+    pub on: bool,
+    /// The clips whose pictures are kept ready there, oldest first.
+    pub held: Vec<i64>,
+    /// The clip whose picture is up.
+    pub showing: Option<i64>,
+}
+
+impl Preview {
+    /// Notes a picture handed over to be kept; the oldest is let go there too.
+    fn keep(&mut self, id: i64) {
+        self.held.retain(|held| *held != id);
+        self.held.push(id);
+        if self.held.len() > overlay::HELD {
+            self.held.remove(0);
+        }
+    }
+}
+
 /// The open menu, and the entry the keyboard is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Menu {
@@ -126,6 +150,7 @@ pub struct State {
     pub detail: Option<Entry>,
     pub images: Images,
     pub thumbs: Images,
+    pub preview: Preview,
     pub unavailable: Option<(i64, feed::Gone)>,
     pub link: Link,
     pub watcher: Option<WatcherStatus>,
@@ -165,6 +190,7 @@ impl State {
             detail: None,
             images: Images::new(PEEK_SLOTS, PEEK_BYTES),
             thumbs: Images::new(THUMB_SLOTS, THUMB_BYTES),
+            preview: Preview::default(),
             unavailable: None,
             link: Link::Connecting,
             watcher: None,
@@ -189,6 +215,13 @@ impl State {
 
     pub fn current(&self) -> Option<&Entry> {
         self.clips.get(self.selected)
+    }
+
+    /// The image clip being looked at that the screen shows large, in
+    /// place of the window showing it small.
+    pub fn on_screen(&self) -> Option<i64> {
+        let clip = self.current().filter(|_| self.peek && self.preview.on)?;
+        (model::previewable(clip) && self.gone(clip.id).is_none()).then_some(clip.id)
     }
 
     /// Why the clip `id` cannot be shown, if the daemon said so.
@@ -249,10 +282,10 @@ impl State {
             }
             items.push(item(
                 Act::View,
-                if self.peek {
-                    "Back to the list"
-                } else {
-                    "View"
+                match (self.peek, self.on_screen()) {
+                    (true, Some(_)) => "Hide the picture",
+                    (true, None) => "Back to the list",
+                    (false, _) => "View",
                 },
                 "Tab",
             ));
@@ -462,10 +495,14 @@ pub fn least() -> (i32, i32) {
     (MIN_SIZE.0 as i32, MIN_SIZE.1 as i32)
 }
 
-/// As the window closes: where it is, is written down while it is still on
-/// screen, and then the feed does what was pending.
-pub fn on_close(_: &mut State, _: &mut Tx) {
-    crate::place::remember(least());
+/// As the window closes: the picture on the screen comes down, where the
+/// window is, is written down while it is still on screen, and then the
+/// feed does what was pending.
+pub fn on_close(state: &mut State, _: &mut Tx) {
+    overlay::finish();
+    if state.live {
+        crate::place::remember(least());
+    }
     feed::finish();
 }
 
@@ -490,8 +527,34 @@ pub fn step(state: &mut State, events: Vec<feed::Event>, tx: &mut Tx) -> bool {
         changed = true;
         apply(state, event, tx);
     }
-    ask_for_the_selected_clip(state);
+    settle(state);
     changed
+}
+
+/// After anything that may change which clip is looked at: asks the daemon
+/// for what the window lacks of it and puts its picture on the screen. Every
+/// handler ends here, so neither waits for the window's next turn.
+fn settle(state: &mut State) {
+    ask_for_the_selected_clip(state);
+    show_on_the_screen(state);
+}
+
+/// Keeps the picture on the screen in step with the clip being looked at.
+/// A picture still on its way leaves the one before it up until it arrives.
+pub fn show_on_the_screen(state: &mut State) {
+    match state.on_screen() {
+        Some(id) if state.preview.showing == Some(id) => {}
+        Some(id) if state.preview.held.contains(&id) => {
+            state.preview.showing = Some(id);
+            overlay::send(overlay::Command::Show(id));
+        }
+        Some(_) => {}
+        None => {
+            if state.preview.showing.take().is_some() {
+                overlay::send(overlay::Command::Hide);
+            }
+        }
+    }
 }
 
 /// While a clip is shown whole, asks the daemon for its text or picture when
@@ -502,7 +565,14 @@ pub fn ask_for_the_selected_clip(state: &mut State) {
         .filter(|_| state.peek)
         .and_then(|clip| match clip.kind {
             _ if state.gone(clip.id).is_some() => None,
-            Kind::Image if state.images.contains(clip.id) || !model::previewable(clip) => None,
+            Kind::Image if !model::previewable(clip) => None,
+            Kind::Image if state.preview.on => {
+                (!state.preview.held.contains(&clip.id)).then_some(feed::Wanted {
+                    id: clip.id,
+                    image: true,
+                })
+            }
+            Kind::Image if state.images.contains(clip.id) => None,
             Kind::Image => Some(feed::Wanted {
                 id: clip.id,
                 image: true,
@@ -559,6 +629,15 @@ pub fn apply(state: &mut State, event: feed::Event, tx: &mut Tx) {
         }
         feed::Event::Watcher(watcher) => state.watcher = Some(watcher),
         feed::Event::Detail(entry) => state.detail = Some(entry),
+        // A picture for the screen goes there as it is; the window keeps none.
+        feed::Event::Picture { id, picture } if state.preview.on => {
+            let show = state.on_screen() == Some(id);
+            state.preview.keep(id);
+            if show {
+                state.preview.showing = Some(id);
+            }
+            overlay::send(overlay::Command::Load { id, picture, show });
+        }
         feed::Event::Picture { id, picture } => {
             if let Some(pixels) = pixels(state, picture) {
                 state.images.keep(id, pixels.0, pixels.1);
@@ -580,6 +659,14 @@ pub fn apply(state: &mut State, event: feed::Event, tx: &mut Tx) {
             state.pasting = false;
             state.note = Some(model::refusal(&reason));
         }
+        // Without the screen the window shows the picture itself, and asks
+        // for it again: what it was sent went to the screen.
+        feed::Event::Preview(on) => {
+            state.preview = Preview {
+                on,
+                ..Preview::default()
+            };
+        }
     }
 }
 
@@ -600,6 +687,12 @@ pub fn on_visible_rows(state: &mut State, rows: Range<usize>) -> bool {
 }
 
 pub fn on_key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
+    let taken = key_pressed(state, event, tx);
+    settle(state);
+    taken
+}
+
+fn key_pressed(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if state.menu.is_some() {
         return menu_key(state, event, tx);
     }
@@ -695,6 +788,7 @@ pub fn choose(state: &mut State, index: usize, tx: &mut Tx) {
         Act::Pause => state.toggle_pause(),
         Act::Options => open_options(state, tx),
     }
+    settle(state);
 }
 
 pub fn open_link(state: &mut State, tx: &mut Tx) {
@@ -714,6 +808,7 @@ pub fn on_query_change(state: &mut State) {
     state.note = None;
     state.peek = false;
     state.refresh();
+    settle(state);
 }
 
 pub fn press_clip(state: &mut State, id: i64, tx: &mut Tx) {
@@ -723,6 +818,7 @@ pub fn press_clip(state: &mut State, id: i64, tx: &mut Tx) {
         state.selected = index;
         state.note = None;
     }
+    settle(state);
 }
 
 /// A right click: the row is selected and the menu opens for it.

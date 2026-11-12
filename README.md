@@ -31,6 +31,8 @@ hl.bind("SUPER + V", hl.dsp.exec_cmd("ditox"))
 hl.window_rule({ match = { class = "^(dev\\.ditox)$" }, float = true, center = true })
 ```
 
+The rule is for the options and for an older Hyprland. On 0.57 and later Ditox asks Hyprland itself to open the list floating, holding the keyboard, and where it was left. `general.snap.enabled = true` makes Hyprland pull a floating window to the edges of the screen while it is dragged.
+
 Hyprland 0.56 and earlier (`hyprland.conf`):
 
 ```ini
@@ -51,7 +53,9 @@ The window is the clips, a search field under them, and a menu. It follows [Ditt
 - The menu (the button at the bottom right, a right click on a clip, or Ctrl+M) has every action with its key, narrows the list to text, images or pinned clips, pauses capture and opens the options.
 - Tab shows the selected clip whole: all of a text, or the image at the size of the window.
 - A line appears above the search only while it has something to say: a deleted clip that can come back, capture paused, an error.
-- The window closes when another window takes the keyboard. The options can turn that off.
+- On Hyprland 0.57 and later the list keeps the keyboard while it is on screen, wherever the pointer goes: moving the mouse over another window does not take it away. Escape, the key that opened it, or a click outside it puts it away.
+- It also opens where it was left and as large as it was left: move it and resize it as any floating window, and the next one opens there, on the screen that has the keyboard. It is always put back wholly on the screen, clear of the bars. The place is in `~/.local/state/ditox/list.json`; remove the file to go back to the centre.
+- Elsewhere only the size is kept, and the window closes when another window takes the keyboard. The options can turn that off.
 
 | Key | Does |
 |-----|------|
@@ -71,6 +75,7 @@ The window is the clips, a search field under them, and a menu. It follows [Ditt
 | Ctrl+Shift+P | Pause or resume capture |
 | Ctrl+, | Open the options |
 | Escape | Leave the clip, then clear the search, then close |
+| The key bound to `ditox` | Close the list, when it is open |
 
 - A deleted clip can come back for six seconds, or until the window closes.
 - Without a window to paste into (another compositor, `hyprctl` missing), Enter only copies and the menu says Copy.

@@ -6,7 +6,7 @@ Clipboard manager in Rust: the `ditoxd` daemon and the `ditox` window (Rune).
 
 - SQLite history (schema 5), FTS and fuzzy search, content-addressed images, watcher, Hyprland paste-back (0.57 Lua dispatch and earlier).
 - JSON-RPC on `$XDG_RUNTIME_DIR/ditox/rpc.sock`, with shared types in `ditox-rpc`.
-- The list, after Ditto: clips with their first lines or a small picture, numbers for the first nine, a search field under them and one menu. Paste, paste as text, copy only, paste by number, see a clip whole, open a link, pin, delete with undo, narrow to text, images or pinned, pause and resume, daemon-down state, light and dark. It closes when it loses the keyboard.
+- The list, after Ditto: clips with their first lines or a small picture, numbers for the first nine, a search field under them and one menu. Paste, paste as text, copy only, paste by number, see a clip whole, open a link, pin, delete with undo, narrow to text, images or pinned, pause and resume, daemon-down state, light and dark. On Hyprland it keeps the keyboard whatever the pointer is over, goes away with Escape, its own key or a click outside, and opens where and as large as it was left, always wholly on the screen.
 - The options, a window of their own (`ditox options`): history, paste, privacy, the keys, and where things are. The daemon checks what is saved, writes `config.toml` and lives by it at once (`config.get`, `config.set`).
 - Paste into a terminal with its own shortcut. Hyprland is asked through its socket.
 

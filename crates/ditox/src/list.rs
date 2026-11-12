@@ -457,6 +457,18 @@ pub fn poll(state: &mut State, _: f64, tx: &mut Tx) -> bool {
     step(state, feed::drain(), tx)
 }
 
+/// The smallest the window gets, in whole points.
+pub fn least() -> (i32, i32) {
+    (MIN_SIZE.0 as i32, MIN_SIZE.1 as i32)
+}
+
+/// As the window closes: where it is, is written down while it is still on
+/// screen, and then the feed does what was pending.
+pub fn on_close(_: &mut State, _: &mut Tx) {
+    crate::place::remember(least());
+    feed::finish();
+}
+
 /// The window closes when the keyboard goes to another window, if it had it.
 pub fn on_focus(state: &mut State, focused: bool, tx: &mut Tx) {
     if focused {
@@ -749,6 +761,11 @@ pub fn hover_menu_item(state: &mut State, index: usize) {
 pub fn close_menu(state: &mut State, tx: &mut Tx) {
     snap(tx);
     state.menu = None;
+}
+
+/// A press outside the window: the user went on to something else.
+pub fn press_elsewhere(_: &mut State, tx: &mut Tx) {
+    tx.close_window();
 }
 
 pub fn press_undo(state: &mut State, tx: &mut Tx) {

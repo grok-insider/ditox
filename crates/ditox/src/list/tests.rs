@@ -1484,6 +1484,57 @@ fn the_window_closes_when_the_keyboard_goes_elsewhere_if_it_had_it() {
 }
 
 #[test]
+fn a_press_outside_the_window_puts_it_away_and_one_inside_does_not() {
+    for (x, y) in [
+        (SIZE.0 / 2.0, 20.0),
+        (SIZE.0 / 2.0, SIZE.1 - 150.0),
+        (SIZE.0 - 20.0, SIZE.1 - 20.0),
+        (1.0, 1.0),
+        (SIZE.0 - 1.0, SIZE.1 - 1.0),
+    ] {
+        let mut runtime = runtime(fixture::ready());
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.0);
+        assert!(!closing(&runtime), "inside, at {x}, {y}");
+        assert!(runtime.state.query.focused);
+    }
+    let mut empty = runtime(State {
+        clips: Vec::new(),
+        ..fixture::ready()
+    });
+    for (x, y) in [
+        (SIZE.0 / 2.0, 100.0),
+        (SIZE.0 / 2.0, 1.0),
+        (1.0, SIZE.1 / 2.0),
+        (SIZE.0 - 1.0, SIZE.1 / 2.0),
+        (SIZE.0 / 2.0, SIZE.1 - 1.0),
+    ] {
+        empty.pointer_down(x, y);
+        empty.pointer_up(x, y);
+        empty.frame(0.0);
+        assert!(
+            !closing(&empty),
+            "the empty part of the window is still the window, at {x}, {y}"
+        );
+    }
+
+    for (x, y) in [
+        (-40.0, 200.0),
+        (SIZE.0 + 300.0, 200.0),
+        (200.0, -1.0),
+        (200.0, SIZE.1 + 900.0),
+        (-2000.0, -1500.0),
+    ] {
+        let mut runtime = runtime(fixture::ready());
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.0);
+        assert!(closing(&runtime), "outside, at {x}, {y}");
+    }
+}
+
+#[test]
 fn every_scene_draws_in_both_themes_and_at_the_smallest_size() {
     for (name, scene) in fixture::SCENES {
         for size in [SIZE, MIN_SIZE] {

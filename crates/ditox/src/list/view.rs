@@ -10,6 +10,8 @@ use crate::feed::Gone;
 use crate::model::{self, Link, PREVIEW_CHARS, PREVIEW_LINES};
 use crate::theme::{self, Palette};
 
+/// How far around the window a press still reaches it, in points.
+const AWAY: f32 = 20_000.0;
 const GUTTER: f32 = 28.0;
 const ROW_PAD: f32 = 7.0;
 const BAR_HEIGHT: f32 = 44.0;
@@ -63,6 +65,13 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         .preserve_focus_on_press(true)
         .on_press(|_: &mut State| {})
         .role("main")
+        // A press that lands outside the window is a press on something
+        // else: Hyprland hands this window every press while it keeps the
+        // keyboard. It puts the window away, as a click elsewhere does.
+        .child(elsewhere("left", Some(-AWAY), Some(-AWAY), None, Some(-AWAY)).w(AWAY))
+        .child(elsewhere("right", None, Some(-AWAY), Some(-AWAY), Some(-AWAY)).w(AWAY))
+        .child(elsewhere("above", Some(0.0), Some(-AWAY), Some(0.0), None).h(AWAY))
+        .child(elsewhere("below", Some(0.0), None, Some(0.0), Some(-AWAY)).h(AWAY))
         .child(body(state, &p));
     if let Some(strip) = strip(state, &p) {
         root = root.child(strip);
@@ -84,6 +93,20 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
 
 fn rule(p: &Palette) -> El {
     el().w_full().h(1.0).fill(p.separator)
+}
+
+/// One of the four stretches around the window where a press is a press
+/// on something else.
+fn elsewhere(
+    side: &'static str,
+    left: Option<f32>,
+    top: Option<f32>,
+    right: Option<f32>,
+    bottom: Option<f32>,
+) -> El {
+    el().key(format!("elsewhere-{side}"))
+        .pin(left, top, right, bottom)
+        .on_press_tx(super::press_elsewhere)
 }
 
 fn body(state: &State, p: &Palette) -> El {

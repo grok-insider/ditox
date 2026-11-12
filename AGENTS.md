@@ -87,6 +87,7 @@ Every request runs on one thread, in order. A `clipboard.wake` asks for a captur
 | `model.rs` | Pure helpers: what a row says, the caption of a clip seen whole, links, search marks, selection |
 | `feed.rs` | The list's background thread that talks to the daemon |
 | `picture.rs` | The threads that decode pictures: one for the clip seen whole, one for the rows |
+| `place.rs` | Where the list opens and how large: read from Hyprland as it closes, asked of Hyprland as it opens |
 | `startup.rs` | Before the window: which Vulkan drivers load, how freed memory is returned |
 | `fixture.rs` | Snapshot scenes |
 
@@ -95,6 +96,12 @@ The list polls `history.pulse` every 250 ms and asks for the list again only whe
 A row of an image clip shows a small picture. The list tells the window which rows are in view (`on_visible_rows`); the window asks for the pictures those rows and a few past them lack (`Thumbs`, a list that replaces the one before). The feed fetches one image a turn, hands it to a second decode thread, and lets at most two wait there: each is a whole image file in memory. A picture that cannot be made is said once (`NoThumb`) and not asked for again.
 
 A delete is the feed's to carry out. The window takes the row off and sends `Delete`; the feed keeps the id for `UNDO_TIME`, leaves it out of every list that arrives, and deletes it when the time is up or the window closes (`feed::finish`, from `on_close`). `Restore` takes it back.
+
+A Wayland window cannot place itself, nor keep the keyboard when the pointer moves over another window (`follow_mouse`), so Hyprland is asked for both (`place.rs`). A `ditox` started on Hyprland does not open a window: it asks the compositor to start the program again with a rule (`hl.dsp.exec_cmd(cmd, { float = true, stay_focused = true, move = "x y" })`) and exits; the second run is told its size (`--placed=WxH`) and opens at it, where the rule puts it, from its first frame. A move after the window is on screen would be seen. `move` is monitor-relative, so the list opens on the screen that has the keyboard, and it is left out until the list has been left somewhere. The `DITOX_*` variables and `LD_LIBRARY_PATH` of the first run go with the command, because the compositor starts it with its own environment, and a Nix wrapper is started rather than the binary it wraps. A Hyprland that does not take the expression (before 0.57) says so and the window opens as the compositor's own rules say; without Hyprland only the size is kept.
+
+As it closes, while it is still on screen, the window finds itself among Hyprland's clients by its process id and writes where it is, measured from the corner of its screen and kept inside what the bars leave, to `$XDG_STATE_HOME/ditox/list.json` (`DITOX_STATE` overrides). A window that is tiled or fullscreen is not written down.
+
+While a `stay_focused` window is on screen Hyprland gives it every pointer event, with positions outside the window for a pointer that is elsewhere. Four stretches around the root (`elsewhere-*`) take a press there and close the window: a click on something else. Started again while the list has the keyboard, `ditox` asks Hyprland to close it instead of opening another.
 
 The menu is drawn in the window (Rune has no native pop-up menu on Linux). Its entries are data (`State::menu_items`): the view draws them, the keyboard walks them and `choose` runs one. While it is open the keyboard is the menu's.
 
@@ -137,8 +144,11 @@ Both windows take their looks from Fabrials UI 0.11 (`libs/fabrials-ui/DESIGN.md
 - Enter pressed while a search is on its way pastes the first result when it arrives, for 1.5 s. Without a daemon, or after the selection moves, Enter is not kept.
 - A press on plain content must not take the keyboard from the search field: the root keeps focus on press.
 - Ctrl and a digit pressed while a search is on its way pastes that number of the results when they arrive, if there are that many. A second press on a row is not kept for a list that has not arrived.
-- The list closes when another window takes the keyboard (`[ui] close_on_blur`), and only if it had the keyboard before. A window left open and unfocused would take a second Super+V for a new one and leave typing to go to whatever is under it.
+- The list never sits open without the keyboard: typing would go to whatever is under it. On Hyprland it holds the keyboard (`stay_focused`) until it is put away; where it cannot, it closes when another window takes the keyboard (`[ui] close_on_blur`), and only if it had the keyboard before.
 - Asked for while the options window has the keyboard, the list opens with nowhere to paste: the options are this program too.
+- The list is never put, or written down, partly off its screen or under a bar: `Placement::inside` is applied when the place is read from Hyprland and again when it is asked for, on the screen it will open on.
+- The run that asks Hyprland to start the program again opens nothing itself, and the run started with `--placed` never asks again.
+- A press inside the window, on a row or on nothing, never closes it: the stretches that close it lie wholly outside the root.
 - The daemon is the only writer of `config.toml`. It takes settings whole or not at all, writes the file beside itself and renames it, and refuses a file that is a link. What `render` writes, `apply_file` reads back to the same config: a test holds the two together.
 - A string in the config is read with its quotes: a comma, a `#` or a bracket inside one is text.
 - A window that cannot open exits. Rune would keep the process alive without one.
@@ -155,6 +165,6 @@ The method table is `crates/ditoxd/src/rpc.rs`: `health.check`, `config.get`, `c
 
 Tests use temporary directories. To run the daemon by hand, set `DITOX_DATA_DIR`, `DITOX_SOCKET` and `DITOX_CLIPBOARD_MOCK` (see the README). Do not point a development daemon at the real database.
 
-Do not open the window on the user's desktop to test it: it reads the active window and `Enter` pastes into it. Use `--snap`, the headless tests, or a compositor of your own with a mock daemon and `DITOX_CONFIG` pointed at a file of your own: Save in the options writes it.
+Do not open the window on the user's desktop to test it: it reads the active window and `Enter` pastes into it. Use `--snap`, the headless tests, or a compositor of your own with a mock daemon and `DITOX_CONFIG` pointed at a file of your own: Save in the options writes it. On a live Hyprland, a window in a workspace that is never shown (`special:hidden`) can be started with `--placed=WxH` and `DITOX_STATE` pointed at a file of your own; without `--placed` the program asks Hyprland to open it on the workspace the user is looking at, holding the keyboard.
 
 In a headless compositor with no keyboard, a tool that types through a virtual keyboard (`wtype`) takes the seat's only keyboard away when it exits, and the list closes as it should when the keyboard goes. Keep one virtual keyboard alive for the length of the test.

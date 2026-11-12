@@ -4,12 +4,13 @@ mod list;
 mod model;
 mod options;
 mod picture;
+mod place;
 mod startup;
 mod theme;
 
 use std::time::Duration;
 
-use rune::{App, AppHandle, AppSpec, Tx, WindowOptions};
+use rune::{App, AppHandle, AppSpec, WindowOptions};
 
 pub const APP_ID: &str = "dev.ditox";
 const LIST_TITLE: &str = "Ditox";
@@ -84,20 +85,37 @@ fn options() {
 
 /// The clip list.
 fn clips() {
+    let placed = place::placed_size(std::env::args().skip(1));
+    let min = list::least();
     if !rune::is_headless() {
         let window = active_window();
-        // Asked for again while it is open, the list is already there. The
-        // options window is this program too: nothing is pasted into it.
+        // Asked for again while it is open, the list goes away: the key that
+        // opens it also puts it back. The options window is this program
+        // too: nothing is pasted into it.
         if window.as_ref().is_some_and(|window| window.class == APP_ID) {
-            if window.is_some_and(|window| window.title == LIST_TITLE) {
+            if let Some(list) = window.filter(|window| window.title == LIST_TITLE) {
+                place::close(&list.address);
                 return;
             }
             list::came_from(None);
         } else {
             list::came_from(window.map(|window| window.address));
         }
+        // The compositor starts the program again as a picker, where it was
+        // left, and that run opens the window.
+        if placed.is_none() && place::relaunch(min, (list::SIZE.0 as i32, list::SIZE.1 as i32)) {
+            return;
+        }
         feed::start();
     }
+    // Started on its own, the window still opens as large as it was left.
+    let size = placed
+        .or_else(|| {
+            let left = place::load()?;
+            Some((left.width.max(min.0) as f32, left.height.max(min.1) as f32))
+        })
+        .filter(|_| !rune::is_headless())
+        .unwrap_or(list::SIZE);
     let spec = AppSpec {
         scenes: fixture::SCENES,
         fonts: theme::FONTS,
@@ -106,7 +124,7 @@ fn clips() {
         setup: Some(list::setup),
         poll: Some(list::poll),
         on_key: Some(list::on_key),
-        ..AppSpec::new(LIST_TITLE, list::SIZE, list::init, list::view::view)
+        ..AppSpec::new(LIST_TITLE, size, list::init, list::view::view)
     };
     let app = App::new(spec)
         .window_options(WindowOptions {
@@ -115,7 +133,7 @@ fn clips() {
         })
         .float_on_open()
         .on_focus(list::on_focus)
-        .on_close(|_: &mut list::State, _: &mut Tx| feed::finish());
+        .on_close(list::on_close);
     run(app);
 }
 

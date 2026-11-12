@@ -1251,6 +1251,62 @@ fn the_pointer_over_the_menu_does_not_move_the_entry_enter_runs() {
     assert!(runtime.find("undo").is_some(), "the pressed entry ran");
 }
 
+/// The keyed elements the pointer has lit up.
+fn lit(runtime: &mut Runtime<State>) -> Vec<String> {
+    for _ in 0..30 {
+        runtime.frame(1.0 / 60.0);
+    }
+    let mut lit: Vec<String> = runtime
+        .elements()
+        .into_iter()
+        .filter(|element| element.hover > 0.5)
+        .filter_map(|element| element.key)
+        .collect();
+    lit.sort();
+    lit
+}
+
+#[test]
+fn nothing_under_the_open_menu_lights_up_as_the_pointer_passes_over_it() {
+    let mut runtime = runtime(fixture::ready());
+    arrive(&mut runtime, fixture::clips());
+    let (x, y) = runtime.find("clip-9").unwrap();
+    runtime.pointer_move(x, y);
+    assert_eq!(lit(&mut runtime), ["clip-9"], "a row answers the pointer");
+
+    key(&mut runtime, Key::Command('m'), ctrl());
+    assert_eq!(
+        lit(&mut runtime),
+        [] as [&str; 0],
+        "the menu opened beside the pointer: the row under it lets go"
+    );
+    // Over each entry, and the rows that lie under the menu at that height.
+    let entries = labels(&runtime.state).len();
+    for index in 0..entries {
+        let (x, y) = runtime.find(&format!("menu-{index}")).unwrap();
+        runtime.pointer_move(x, y);
+        let lit = lit(&mut runtime);
+        let own = format!("menu-{index}");
+        assert!(
+            lit.iter().all(|key| *key == own),
+            "over entry {index} only that entry may light up: {lit:?}"
+        );
+        if index != 0 {
+            assert_eq!(lit, [own], "the entry under the pointer is tinted");
+        }
+    }
+    // Beside the menu, over the rows: they are behind it too.
+    runtime.pointer_move(20.0, 200.0);
+    assert_eq!(lit(&mut runtime), [] as [&str; 0]);
+
+    // With the menu away the rows answer again.
+    key(&mut runtime, Key::Escape, Mods::default());
+    runtime.pointer_move(20.5, 200.5);
+    let back = lit(&mut runtime);
+    assert!(back.len() == 1 && back[0].starts_with("clip-"), "{back:?}");
+    assert!(runtime.state.query.focused, "the search kept the keyboard");
+}
+
 #[test]
 fn the_menu_follows_the_arrows_and_enter_does_what_the_entry_says() {
     let mut runtime = runtime(fixture::ready());

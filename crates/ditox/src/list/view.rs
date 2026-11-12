@@ -72,9 +72,9 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
         .child(elsewhere("right", None, Some(-AWAY), Some(-AWAY), Some(-AWAY)).w(AWAY))
         .child(elsewhere("above", Some(0.0), Some(-AWAY), Some(0.0), None).h(AWAY))
         .child(elsewhere("below", Some(0.0), None, Some(0.0), Some(-AWAY)).h(AWAY))
-        .child(body(state, &p));
+        .child(behind_the_menu(state, body(state, &p)));
     if let Some(strip) = strip(state, &p) {
-        root = root.child(strip);
+        root = root.child(behind_the_menu(state, strip));
     }
     root = root.child(rule(&p)).child(search_bar(state, &p));
     if let Some(open) = state.menu {
@@ -89,6 +89,18 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
             .child(menu(state, open, &p));
     }
     root
+}
+
+/// While the menu is open, what lies under it answers nothing: no row
+/// lights up as the pointer passes over the menu, as if it went through it.
+/// A hover tint goes to every element the pointer is inside, drawn over or
+/// not, so being covered is not enough.
+fn behind_the_menu(state: &State, content: El) -> El {
+    if state.menu.is_some() {
+        content.inert()
+    } else {
+        content
+    }
 }
 
 fn rule(p: &Palette) -> El {

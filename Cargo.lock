@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "ditox"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "ditox-rpc",
  "ditoxd",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "ditox-rpc"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "serde",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "ditoxd"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "ditox-rpc",

@@ -52,6 +52,8 @@
             '';
             meta = {
               description = "Ditox clipboard manager: the ditoxd daemon and the ditox window";
+              homepage = "https://github.com/grok-insider/ditox";
+              license = lib.licenses.agpl3Plus;
               mainProgram = "ditox";
               platforms = systems;
             };

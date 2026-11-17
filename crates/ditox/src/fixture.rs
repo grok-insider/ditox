@@ -440,7 +440,7 @@ pub fn config_view() -> ConfigView {
         path: "/home/friend/.config/ditox/config.toml".into(),
         writable: true,
         database: "/home/friend/.local/share/ditox/ditox-v2.db".into(),
-        version: "0.2.0".into(),
+        version: "0.4.0".into(),
     }
 }
 

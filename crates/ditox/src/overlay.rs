@@ -449,11 +449,32 @@ pub fn start() {
     }
 }
 
+/// What the plugin is asked for `request`, in order; the answer to the last
+/// is the answer. The plugin puts a new picture in the place of the one
+/// before without clearing where that one was drawn: what the new one does
+/// not cover stayed on the screen, picture over picture. Closing the one
+/// before first clears it.
+#[cfg_attr(windows, allow(dead_code))]
+fn plugin_requests(request: &str) -> Vec<String> {
+    let mut requests = Vec::new();
+    if request.starts_with("/hyproverlay surface-open-json ") {
+        requests.push(format!("/hyproverlay surface-close {SURFACE}"));
+    }
+    requests.push(request.to_string());
+    requests
+}
+
 /// Hyprland and the shared memory its plugin makes.
 #[cfg(not(windows))]
 fn desk() -> Desk {
     Desk {
-        ask: Box::new(|request| ditox_rpc::hypr::request(request, WAIT)),
+        ask: Box::new(|request| {
+            let mut answer = Ok(Vec::new());
+            for request in plugin_requests(request) {
+                answer = ditox_rpc::hypr::request(&request, WAIT);
+            }
+            answer
+        }),
         shm: PathBuf::from("/dev/shm"),
         pid: i64::from(std::process::id()),
     }
@@ -994,6 +1015,24 @@ mod tests {
             "memory of another size is not this picture's"
         );
         assert_eq!(desk.room(), vec![0; 260]);
+    }
+
+    #[test]
+    fn the_picture_before_is_closed_before_the_plugin_is_asked_for_the_next() {
+        let open = open_request((965, 543), rect(3116, 329, 1448, 815));
+        assert_eq!(
+            plugin_requests(&open),
+            ["/hyproverlay surface-close ditox.preview", open.as_str()]
+        );
+        for other in [
+            "j/hyproverlay status",
+            "j/monitors",
+            "j/clients",
+            "/hyproverlay surface-present ditox.preview 0 3",
+            "/hyproverlay surface-close ditox.preview",
+        ] {
+            assert_eq!(plugin_requests(other), [other]);
+        }
     }
 
     #[test]

@@ -1,7 +1,9 @@
 name: Release
 
 # A tag `v<version>` builds the two programs for Linux and for Windows and
-# publishes them as a GitHub release, with their checksums.
+# publishes them as a GitHub release, with their checksums. The release is
+# made first, as a draft; each system adds its archive to it, and it is
+# published once both are there. Nothing goes through the run's artifacts.
 
 on:
   push:
@@ -15,10 +17,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  linux:
-    name: x86_64-linux
-    # The oldest runner: the programs then run on any glibc from 2.35 on.
-    runs-on: ubuntu-22.04
+  draft:
+    name: draft
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -26,7 +29,27 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           test "v$version" = "$GITHUB_REF_NAME" || { echo "::error::tag $GITHUB_REF_NAME, Cargo.toml $version"; exit 1; }
-          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --title "Ditox ${GITHUB_REF_NAME#v}" \
+            --notes "Ditox for Linux (x86_64, glibc 2.35 or later) and for Windows 10 and 11 (x86_64). How to install each is in the [README](https://github.com/${GITHUB_REPOSITORY}#install); \`SHA256SUMS\` has the checksum of every download." \
+            --generate-notes
+
+  linux:
+    name: x86_64-linux
+    needs: draft
+    # The oldest runner: the programs then run on any glibc from 2.35 on.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev
@@ -49,32 +72,25 @@ jobs:
         run: cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES.html
 
       - name: Package
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          name="ditox-$VERSION-x86_64-linux"
+          name="ditox-${GITHUB_REF_NAME#v}-x86_64-linux"
           mkdir -p "dist/$name"
           install -m755 target/release/ditox target/release/ditoxd "dist/$name/"
           install -m644 crates/ditox/ditox.desktop packaging/ditox.service LICENSE README.md THIRD-PARTY-LICENSES.html "dist/$name/"
           "dist/$name/ditoxd" --version
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux
-          path: dist/*.tar.gz
-          if-no-files-found: error
+          gh release upload "$GITHUB_REF_NAME" "dist/$name.tar.gz" --clobber
 
   windows:
     name: x86_64-windows
+    needs: draft
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: The tag is the version in Cargo.toml
-        shell: bash
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          test "v$version" = "$GITHUB_REF_NAME" || { echo "::error::tag $GITHUB_REF_NAME, Cargo.toml $version"; exit 1; }
-          echo "VERSION=$version" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -95,18 +111,15 @@ jobs:
 
       - name: Package
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          name="ditox-$VERSION-x86_64-windows"
+          name="ditox-${GITHUB_REF_NAME#v}-x86_64-windows"
           mkdir -p "dist/$name"
           cp target/release/ditox.exe target/release/ditoxd.exe LICENSE README.md THIRD-PARTY-LICENSES.html "dist/$name/"
           "dist/$name/ditoxd.exe" --version
-          cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: dist/*.zip
-          if-no-files-found: error
+          (cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null)
+          gh release upload "$GITHUB_REF_NAME" "dist/$name.zip" --clobber
 
   publish:
     name: publish
@@ -114,23 +127,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
       - name: Checksums
-        run: cd dist && sha256sum ditox-* > SHA256SUMS && cat SHA256SUMS
-
-      - name: Release
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag \
-            --title "Ditox ${GITHUB_REF_NAME#v}" \
-            --notes "Ditox for Linux (x86_64, glibc 2.35 or later) and for Windows 10 and 11 (x86_64). How to install each is in the [README](https://github.com/${GITHUB_REPOSITORY}#install); \`SHA256SUMS\` has the checksum of every download." \
-            --generate-notes
+          gh release download "$GITHUB_REF_NAME" --pattern 'ditox-*' --dir dist
+          cd dist
+          test "$(find . -name 'ditox-*' | wc -l)" = 2
+          sha256sum ditox-* > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber
+
+      - name: Publish
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

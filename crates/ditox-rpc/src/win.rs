@@ -55,6 +55,8 @@ pub struct Screen {
     pub scale: f64,
     /// The whole monitor, taskbar included: its corner and its size.
     pub whole: (i32, i32, i32, i32),
+    /// Windows' handle for the monitor, as a number.
+    pub monitor: isize,
 }
 
 /// A program built for the Windows desktop starts without a console. Started
@@ -171,8 +173,19 @@ pub fn close(address: &str) -> bool {
 
 /// This process's visible top-level window.
 pub fn own_window() -> Option<Window> {
-    struct Search {
+    own_window_where(None)
+}
+
+/// This process's visible top-level window called `title`, when it has
+/// more than one.
+pub fn own_window_titled(title: &str) -> Option<Window> {
+    own_window_where(Some(title))
+}
+
+fn own_window_where(titled: Option<&str>) -> Option<Window> {
+    struct Search<'a> {
         pid: u32,
+        titled: Option<&'a str>,
         found: HWND,
     }
     unsafe extern "system" fn visit(window: HWND, search: LPARAM) -> i32 {
@@ -182,7 +195,10 @@ pub fn own_window() -> Option<Window> {
             let search = &mut *(search as *mut Search);
             let mut pid = 0;
             GetWindowThreadProcessId(window, &mut pid);
-            if pid == search.pid && IsWindowVisible(window) != 0 {
+            if pid == search.pid
+                && IsWindowVisible(window) != 0
+                && search.titled.is_none_or(|wanted| title(window) == wanted)
+            {
                 search.found = window;
                 return 0;
             }
@@ -191,6 +207,7 @@ pub fn own_window() -> Option<Window> {
     }
     let mut search = Search {
         pid: std::process::id(),
+        titled,
         found: std::ptr::null_mut(),
     };
     // SAFETY: `visit` only runs during this call, with `search` alive.
@@ -271,6 +288,7 @@ fn screen(monitor: *mut c_void) -> Option<Screen> {
                 whole.right - whole.left,
                 whole.bottom - whole.top,
             ),
+            monitor: monitor as isize,
         })
     }
 }

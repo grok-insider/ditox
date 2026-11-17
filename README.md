@@ -29,9 +29,10 @@ Hyprland 0.57 and later (`hyprland.lua`):
 ```lua
 hl.bind("SUPER + V", hl.dsp.exec_cmd("ditox"))
 hl.window_rule({ match = { class = "^(dev\\.ditox)$" }, float = true, center = true })
+hl.layer_rule({ match = { namespace = "^(ditox-picture)$" }, no_anim = true })
 ```
 
-The rule is for the options and for an older Hyprland. On 0.57 and later Ditox asks Hyprland itself to open the list floating, holding the keyboard, and where it was left. `general.snap.enabled = true` makes Hyprland pull a floating window to the edges of the screen while it is dragged.
+The window rule is for the options and for an older Hyprland. The layer rule is for the picture: each one is a new surface, and with layer animations on it would pop in and fade out as the selection moves. On 0.57 and later Ditox asks Hyprland itself to open the list floating, holding the keyboard, and where it was left. `general.snap.enabled = true` makes Hyprland pull a floating window to the edges of the screen while it is dragged.
 
 Hyprland 0.56 and earlier (`hyprland.conf`):
 
@@ -52,7 +53,7 @@ The window is the clips, a search field under them, and a menu. It follows [Ditt
 - Pinned clips lead the list, with a mark at their left edge. The window opens on the newest clip below them.
 - The menu (the button at the bottom right, a right click on a clip, or Ctrl+M) starts on its first entry wherever the pointer is, has every action with its key, narrows the list to text, images or pinned clips, pauses capture and opens the options.
 - Tab shows the selected clip whole: all of a text in the window, or the image.
-- Where Hyprland runs the [hypr-overlay](https://github.com/grok-insider/hypr-overlay) plugin, the image is shown large on the screen instead: drawn by the compositor in the middle of the screen the list is on, with no window around it, taking neither the keyboard nor the pointer. The list stays, and the picture follows the selection until Tab or Escape. When the middle is where the list is, the picture goes beside it. Without the plugin the image is shown in the window.
+- An image is shown large on the screen instead: Ditox draws it in the middle of the screen the list is on, at its own sharpness, with no window around it, taking neither the keyboard nor the pointer. The list stays, and the picture follows the selection until Tab or Escape. When the middle is where the list is, the picture goes beside it. This needs Hyprland (or Windows), which say where the list is; elsewhere the image is shown in the window.
 - A line appears above the search only while it has something to say: a deleted clip that can come back, capture paused, an error.
 - On Hyprland 0.57 and later the list keeps the keyboard while it is on screen, wherever the pointer goes: moving the mouse over another window does not take it away. Escape, the key that opened it, or a click outside it puts it away.
 - It also opens where it was left and as large as it was left: move it and resize it as any floating window, and the next one opens there, on the screen that has the keyboard. It is always put back wholly on the screen, clear of the bars. The place is in `~/.local/state/ditox/list.json`; remove the file to go back to the centre.
@@ -116,7 +117,7 @@ Nothing else is needed: the daemon reads and writes the Windows clipboard, finds
 - A screenshot or a copied picture is kept as a PNG; pasted back it is offered as that file and as a bitmap. A bare bitmap beside plain text (spreadsheet cells) is taken as the text.
 - Files copied in Explorer are kept as their `file:` addresses and pasted back as files.
 - The list opens where it was left on the screen the pointer is on, in the middle the first time.
-- An image seen whole (`Tab`) is drawn large on the screen, beside the list, as with hypr-overlay on Hyprland; Ditox draws it itself, so nothing needs installing.
+- An image seen whole (`Tab`) is drawn large on the screen, beside the list, as on Hyprland.
 - Windows does not let a program type into a window that runs as administrator unless it does too.
 
 ## Upgrading from 0.1

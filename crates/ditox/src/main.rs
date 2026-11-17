@@ -142,7 +142,6 @@ fn clips() {
             return;
         }
         feed::start();
-        overlay::start();
     }
     // Started on its own, the window still opens as large as it was left.
     let size = placed
@@ -171,7 +170,7 @@ fn clips() {
         on_key: Some(list::on_key),
         ..AppSpec::new(LIST_TITLE, size, list::init, list::view::view)
     };
-    let app = App::new(spec)
+    let mut app = App::new(spec)
         .window_options(WindowOptions {
             borderless: true,
             position,
@@ -180,6 +179,9 @@ fn clips() {
         .float_on_open()
         .on_focus(list::on_focus)
         .on_close(list::on_close);
+    if !rune::is_headless() {
+        overlay::attach(&mut app);
+    }
     run(app);
 }
 

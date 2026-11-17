@@ -42,6 +42,7 @@ pub struct Screen {
 }
 
 /// One of Hyprland's windows, as far as placing it goes.
+#[cfg(any(not(windows), test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Seen {
     pub at: (i32, i32),
@@ -168,6 +169,7 @@ fn screen(monitor: &Value) -> Option<(i64, bool, Screen)> {
 }
 
 /// The window of the process `pid` among Hyprland's.
+#[cfg(any(not(windows), test))]
 pub fn window_of(clients: &[u8], pid: i64) -> Option<Seen> {
     let clients: Value = serde_json::from_slice(clients).ok()?;
     let client = clients

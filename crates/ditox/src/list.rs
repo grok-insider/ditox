@@ -109,27 +109,13 @@ pub struct Item {
     pub leads: bool,
 }
 
-/// The picture shown large on the screen, outside the window, as far as
-/// the window knows: what it asked the compositor's side for.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The picture shown large on the screen, outside the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Preview {
-    /// The compositor can show pictures.
+    /// A picture can go on the screen.
     pub on: bool,
-    /// The clips whose pictures are kept ready there, oldest first.
-    pub held: Vec<i64>,
     /// The clip whose picture is up.
     pub showing: Option<i64>,
-}
-
-impl Preview {
-    /// Notes a picture handed over to be kept; the oldest is let go there too.
-    fn keep(&mut self, id: i64) {
-        self.held.retain(|held| *held != id);
-        self.held.push(id);
-        if self.held.len() > overlay::HELD {
-            self.held.remove(0);
-        }
-    }
 }
 
 /// The open menu, and the entry the keyboard is on.
@@ -477,6 +463,10 @@ pub fn init() -> State {
         target: TARGET.get().cloned().flatten(),
         now_ms: now_ms(),
         live: true,
+        preview: Preview {
+            on: overlay::ready(),
+            showing: None,
+        },
         ..State::blank()
     }
 }
@@ -499,7 +489,9 @@ pub fn least() -> (i32, i32) {
 /// window is, is written down while it is still on screen, and then the
 /// feed does what was pending.
 pub fn on_close(state: &mut State, _: &mut Tx) {
-    overlay::finish();
+    if state.preview.showing.take().is_some() {
+        overlay::hide();
+    }
     if state.live {
         crate::place::remember(least());
     }
@@ -527,34 +519,55 @@ pub fn step(state: &mut State, events: Vec<feed::Event>, tx: &mut Tx) -> bool {
         changed = true;
         apply(state, event, tx);
     }
-    settle(state);
+    // The system would not show the overlay: the window shows the picture.
+    if state.preview.on && overlay::lost() {
+        state.preview = Preview::default();
+        changed = true;
+    }
+    changed |= settle(state);
     changed
 }
 
 /// After anything that may change which clip is looked at: asks the daemon
 /// for what the window lacks of it and puts its picture on the screen. Every
 /// handler ends here, so neither waits for the window's next turn.
-fn settle(state: &mut State) {
+/// Says whether what the view reads changed.
+fn settle(state: &mut State) -> bool {
     ask_for_the_selected_clip(state);
-    show_on_the_screen(state);
+    show_on_the_screen(state)
 }
 
 /// Keeps the picture on the screen in step with the clip being looked at.
 /// A picture still on its way leaves the one before it up until it arrives.
-pub fn show_on_the_screen(state: &mut State) {
+/// Says whether the screen gave out, and the window shows the picture now.
+pub fn show_on_the_screen(state: &mut State) -> bool {
     match state.on_screen() {
         Some(id) if state.preview.showing == Some(id) => {}
-        Some(id) if state.preview.held.contains(&id) => {
-            state.preview.showing = Some(id);
-            overlay::send(overlay::Command::Show(id));
+        Some(id) => {
+            let Some(pixels) = state.images.get(id) else {
+                return false;
+            };
+            let size = state
+                .current()
+                .and_then(|clip| Some((clip.image_width?, clip.image_height?)))
+                .and_then(|(width, height)| {
+                    Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
+                })
+                .filter(|(width, height)| *width > 0 && *height > 0);
+            if overlay::show(id, pixels, size) {
+                state.preview.showing = Some(id);
+            } else {
+                state.preview = Preview::default();
+                return true;
+            }
         }
-        Some(_) => {}
         None => {
             if state.preview.showing.take().is_some() {
-                overlay::send(overlay::Command::Hide);
+                overlay::hide();
             }
         }
     }
+    false
 }
 
 /// While a clip is shown whole, asks the daemon for its text or picture when
@@ -565,14 +578,7 @@ pub fn ask_for_the_selected_clip(state: &mut State) {
         .filter(|_| state.peek)
         .and_then(|clip| match clip.kind {
             _ if state.gone(clip.id).is_some() => None,
-            Kind::Image if !model::previewable(clip) => None,
-            Kind::Image if state.preview.on => {
-                (!state.preview.held.contains(&clip.id)).then_some(feed::Wanted {
-                    id: clip.id,
-                    image: true,
-                })
-            }
-            Kind::Image if state.images.contains(clip.id) => None,
+            Kind::Image if state.images.contains(clip.id) || !model::previewable(clip) => None,
             Kind::Image => Some(feed::Wanted {
                 id: clip.id,
                 image: true,
@@ -629,15 +635,6 @@ pub fn apply(state: &mut State, event: feed::Event, tx: &mut Tx) {
         }
         feed::Event::Watcher(watcher) => state.watcher = Some(watcher),
         feed::Event::Detail(entry) => state.detail = Some(entry),
-        // A picture for the screen goes there as it is; the window keeps none.
-        feed::Event::Picture { id, picture } if state.preview.on => {
-            let show = state.on_screen() == Some(id);
-            state.preview.keep(id);
-            if show {
-                state.preview.showing = Some(id);
-            }
-            overlay::send(overlay::Command::Load { id, picture, show });
-        }
         feed::Event::Picture { id, picture } => {
             if let Some(pixels) = pixels(state, picture) {
                 state.images.keep(id, pixels.0, pixels.1);
@@ -658,14 +655,6 @@ pub fn apply(state: &mut State, event: feed::Event, tx: &mut Tx) {
         feed::Event::PasteRefused(reason) => {
             state.pasting = false;
             state.note = Some(model::refusal(&reason));
-        }
-        // Without the screen the window shows the picture itself, and asks
-        // for it again: what it was sent went to the screen.
-        feed::Event::Preview(on) => {
-            state.preview = Preview {
-                on,
-                ..Preview::default()
-            };
         }
     }
 }

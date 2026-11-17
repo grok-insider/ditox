@@ -39,8 +39,27 @@ pub fn set_scale(scale: f32) {
     );
 }
 
+/// The longest side, in pixels, of the screen a picture may be shown large
+/// on; zero while there is none. A picture is then kept that large.
+static SCREEN_SIDE: AtomicU32 = AtomicU32::new(0);
+/// No screen asks for more than this.
+const SCREEN_SIDE_MOST: u32 = 4096;
+
+pub fn set_screen_side(pixels: u32) {
+    SCREEN_SIDE.store(pixels, Ordering::Relaxed);
+}
+
+/// The longest side a picture is kept at: what the window draws, or what
+/// the screen shows when that is more, and never more than any screen asks.
+fn kept_side(window: u32, screen: u32) -> u32 {
+    window.max(screen.min(SCREEN_SIDE_MOST))
+}
+
 pub fn long_side() -> u32 {
-    LONG_SIDE.load(Ordering::Relaxed)
+    kept_side(
+        LONG_SIDE.load(Ordering::Relaxed),
+        SCREEN_SIDE.load(Ordering::Relaxed),
+    )
 }
 
 /// The image in `bytes`, no larger than `long_side` on its longest side.
@@ -212,6 +231,22 @@ pub mod tests {
             bytes: Vec::new(),
         };
         assert_eq!(newest(alone, &queue).id, 9);
+    }
+
+    #[test]
+    fn a_picture_for_the_screen_is_kept_as_large_as_the_screen_shows_it() {
+        assert_eq!(kept_side(1280, 0), 1280, "no screen: what the window draws");
+        assert_eq!(kept_side(1280, 2560), 2560);
+        assert_eq!(
+            kept_side(2048, 1920),
+            2048,
+            "a small screen asks for no less"
+        );
+        assert_eq!(
+            kept_side(1280, 7680),
+            4096,
+            "and no screen for more than this"
+        );
     }
 
     #[test]

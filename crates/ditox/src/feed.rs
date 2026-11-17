@@ -107,8 +107,6 @@ pub enum Event {
     Note(String),
     Pasted,
     PasteRefused(String),
-    /// Whether the compositor can show a picture large on the screen.
-    Preview(bool),
 }
 
 struct Bridge {
@@ -198,7 +196,7 @@ pub fn drain() -> Vec<Event> {
     }
 }
 
-pub(crate) fn push(event: Event) {
+fn push(event: Event) {
     let Some(bridge) = BRIDGE.get() else { return };
     bridge
         .inbox

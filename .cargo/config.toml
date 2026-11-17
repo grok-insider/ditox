@@ -1,0 +1,4 @@
+# The Windows programs carry the C runtime inside them: a Windows without the
+# Visual C++ redistributable has no VCRUNTIME140.dll to give them.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

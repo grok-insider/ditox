@@ -46,6 +46,17 @@ Scenes are fixtures in `crates/ditox/src/fixture.rs`, one set for each window. T
 
 The window tests (`list/tests.rs`, `options/tests.rs`) run the real views in Rune's headless `Runtime`, with no GPU. In the list, feed events reach them through `step`, the window's own turn, and `feed::take_sent()` returns what the window asked the daemon for. `feed/tests.rs` runs the feed against a real daemon in the same process, with a file for a clipboard; the options' test reads and saves settings through the same daemon.
 
+## Releasing
+
+Licence: AGPL-3.0-or-later (`LICENSE`); the workspace says so once and each crate takes it from there.
+
+A release is a signed tag `v<version>` on `master`, where `<version>` is the one in the workspace's `Cargo.toml` (the release jobs refuse any other):
+
+1. Set `version` in `Cargo.toml`, build so `Cargo.lock` follows, and commit.
+2. `git tag -s v<version> -m "Ditox <version>"` and push `master` and the tag.
+
+`.github/workflows/release.yml` then tests and builds on Ubuntu 22.04 (the programs run from glibc 2.35 on; they link `libxkbcommon` and open Wayland and Vulkan when they start) and on Windows (`.cargo/config.toml` puts the C runtime inside the programs: a Windows without the Visual C++ redistributable has no `VCRUNTIME140.dll`), writes `THIRD-PARTY-LICENSES.html` with `cargo about` (`about.toml` lists the licences a crate may carry and fails on any other; `about.hbs` is the page), and publishes both archives with `SHA256SUMS`. Nothing is signed. A crate added with a licence `about.toml` does not list fails the release, not the build: run `cargo about generate about.hbs > /dev/null` after adding one.
+
 ## Layout
 
 ```text

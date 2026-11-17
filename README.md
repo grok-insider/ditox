@@ -8,6 +8,29 @@ Ditox is a clipboard manager for Linux/Wayland (first target: Hyprland) and for 
 
 ## Install
 
+Each [release](https://github.com/grok-insider/ditox/releases/latest) has the two programs for Linux and for Windows, with a `SHA256SUMS` file to check a download against.
+
+### Linux, from a release
+
+`ditox-<version>-x86_64-linux.tar.gz`: built on Ubuntu 22.04, so it runs on a distribution with glibc 2.35 or later.
+
+```sh
+tar -xzf ditox-*-x86_64-linux.tar.gz
+cd ditox-*-x86_64-linux
+install -Dm755 ditox ditoxd -t ~/.local/bin
+install -Dm644 ditox.desktop -t ~/.local/share/applications
+install -Dm644 ditox.service -t ~/.config/systemd/user
+systemctl --user enable --now ditox.service
+```
+
+The unit starts `~/.local/bin/ditoxd daemon` with the graphical session. The programs need what a Wayland desktop already has (`libxkbcommon`, `libwayland-client`, a Vulkan driver) and `wl-clipboard` for `wl-paste` and `wl-copy`. Then bind a key to `ditox`, as below.
+
+### Windows, from a release
+
+`ditox-<version>-x86_64-windows.zip`: see [Windows](#windows). The programs are not signed, so SmartScreen asks before the first run.
+
+### Nix
+
 ```nix
 {
   inputs.ditox.url = "github:grok-insider/ditox";
@@ -122,7 +145,7 @@ Nothing else is needed: the daemon reads and writes the Windows clipboard, finds
 
 ## Upgrading from 0.1
 
-The history and the config are the same files. On its first start the 0.2 daemon:
+The history and the config are the same files. On its first start the new daemon:
 
 - writes a copy of the history as it was, `ditox-v2.db.before-v5`;
 - takes one line break off every text clip. The 0.1 watcher added it to everything it captured, and pasted it back.
@@ -198,5 +221,7 @@ ditoxd ingest image < shot.png
 ```
 
 ## Licences
+
+Ditox is free software under the GNU Affero General Public License, version 3 or later: see [LICENSE](LICENSE). The licences of the crates it is built from are in `THIRD-PARTY-LICENSES.html`, in every release archive.
 
 The window embeds IBM Plex Sans and IBM Plex Mono (SIL Open Font License, `crates/ditox/assets/fonts/OFL.txt`) and four Lucide icons (ISC).

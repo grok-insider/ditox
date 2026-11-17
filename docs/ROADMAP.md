@@ -33,3 +33,5 @@ About 80 MB of it is the NVIDIA driver's libraries, which every program that dra
 ## Distribution
 
 Nix flake. CI builds `x86_64-linux` and `aarch64-linux` and pushes to `https://cache.fabrials.com/fabrials`. On Windows it runs the tests and keeps `ditox.exe` and `ditoxd.exe` as an artifact of the run.
+
+A tag `v<version>` publishes a GitHub release (`.github/workflows/release.yml`): a `tar.gz` for `x86_64-linux` built on Ubuntu 22.04, a `zip` for `x86_64-windows` with the C runtime inside the programs, `SHA256SUMS`, and the licences of every crate in each archive. The Windows programs are not signed.
